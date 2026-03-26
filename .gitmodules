@@ -1,0 +1,3 @@
+[submodule "CoOp"]
+	path = CoOp
+	url = https://github.com/KaiyangZhou/CoOp.git
