@@ -82,7 +82,12 @@ class EmoSet(Dataset):
         assert num_emotion_classes in (8, 2)
         info = json.load(open(os.path.join(data_root, 'info.json')))
         if num_emotion_classes == 8:
-            pass
+            # Wrap the flat structure in 'emotion' key for consistency
+            emotion_info = {
+                'label2idx': info['label2idx'],
+                'idx2label': info['idx2label']
+            }
+            info = {'emotion': emotion_info}
         elif num_emotion_classes == 2:
             emotion_info = {
                 'label2idx': {

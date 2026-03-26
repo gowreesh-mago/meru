@@ -4,6 +4,11 @@
 
 set -e  # Exit on error
 
+# Setup Python path
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+
 echo "=========================================="
 echo "Zero-Shot Emotion Classification"
 echo "=========================================="

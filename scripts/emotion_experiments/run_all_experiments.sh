@@ -11,45 +11,94 @@
 set -e  # Exit on error
 
 # ========================================
-# CONFIGURATION PLACEHOLDERS
+# CONFIGURATION SECTION
 # ========================================
-# Override these by setting environment variables before running this script
-# Example:
-#   export EMOSET_ROOT=/path/to/emoset
-#   export PRETRAINED_CLIP=/path/to/clip.pth
-#   export PRETRAINED_MERU=/path/to/meru.pth
-#   bash scripts/emotion_experiments/run_all_experiments.sh
+# Edit the variables below to customize your experiment
+# No need to use "export" commands - just edit and run!
+#
+# Quick Start:
+#   1. Edit paths/parameters below (or leave defaults)
+#   2. Run: bash scripts/emotion_experiments/run_all_experiments.sh
+#   3. Done!
 
-# Dataset configuration
-EMOSET_ROOT="${EMOSET_ROOT:-datasets/emoset}"
+# --------------------------------------------------
+# Dataset Configuration
+# --------------------------------------------------
+EMOSET_ROOT="/ivi/zfs/s0/original_homes/gmago/emoset"
+# Where your Emoset dataset is located
 
-# Pretrained checkpoints (REQUIRED - no defaults)
-PRETRAINED_CLIP="${PRETRAINED_CLIP:-}"
-PRETRAINED_MERU="${PRETRAINED_MERU:-}"
+# --------------------------------------------------
+# Pretrained Checkpoints
+# --------------------------------------------------
+# Leave empty for auto-download, or set to your checkpoint paths
+PRETRAINED_CLIP=""
+PRETRAINED_MERU=""
+# Examples:
+# PRETRAINED_CLIP="/path/to/my/clip_model.pth"
+# PRETRAINED_MERU="/path/to/my/meru_model.pth"
 
-# Output directories
-OUTPUT_BASE="${OUTPUT_BASE:-output}"
-EXPERIMENT_BASE="${EXPERIMENT_BASE:-$OUTPUT_BASE/experiments}"
+# Checkpoint download directory (if auto-downloading)
+CHECKPOINT_DIR="/ivi/zfs/s0/original_homes/gmago/models"
 
-# Log directories
-LOG_DIR_CLIP="${LOG_DIR_CLIP:-}"  # If empty, will use OUTPUT_DIR/logs
-LOG_DIR_MERU="${LOG_DIR_MERU:-}"  # If empty, will use OUTPUT_DIR/logs
+# Auto-download pretrained weights? (true/false)
+AUTO_DOWNLOAD="true"
+# Set to "false" if you want to be prompted before downloading
 
-# CLIP+CoOp training configuration
-CLIP_NUM_EPOCHS="${CLIP_NUM_EPOCHS:-50}"
-CLIP_BATCH_SIZE="${CLIP_BATCH_SIZE:-32}"
-CLIP_LEARNING_RATE="${CLIP_LEARNING_RATE:-0.002}"
-CLIP_NUM_CTX="${CLIP_NUM_CTX:-16}"
+# --------------------------------------------------
+# Output Directories
+# --------------------------------------------------
+OUTPUT_BASE="/home/gmago/Emotions/outputs"
+# Base directory for all outputs
 
-# MERU+CoOp training configuration
-MERU_NUM_EPOCHS="${MERU_NUM_EPOCHS:-100}"
-MERU_BATCH_SIZE="${MERU_BATCH_SIZE:-32}"
-MERU_LEARNING_RATE="${MERU_LEARNING_RATE:-0.002}"
-MERU_NUM_CTX="${MERU_NUM_CTX:-16}"
-MERU_ENTAIL_WEIGHT="${MERU_ENTAIL_WEIGHT:-0.2}"
+EXPERIMENT_BASE="$OUTPUT_BASE/experiments"
+# Directory for timestamped experiment runs
 
-# Evaluation configuration
-EVAL_BATCH_SIZE="${EVAL_BATCH_SIZE:-128}"
+LOG_DIR_CLIP=""
+LOG_DIR_MERU=""
+# Leave empty to use default (OUTPUT_DIR/logs)
+# Or set custom paths:
+# LOG_DIR_CLIP="/logs/clip_experiments"
+# LOG_DIR_MERU="/logs/meru_experiments"
+
+# --------------------------------------------------
+# CLIP+CoOp Training Parameters
+# --------------------------------------------------
+CLIP_NUM_EPOCHS="50"
+CLIP_BATCH_SIZE="32"
+CLIP_LEARNING_RATE="0.002"
+CLIP_NUM_CTX="16"  # Number of learnable context tokens
+
+# --------------------------------------------------
+# MERU+CoOp Training Parameters
+# --------------------------------------------------
+MERU_NUM_EPOCHS="100"
+MERU_BATCH_SIZE="32"
+MERU_LEARNING_RATE="0.002"
+MERU_NUM_CTX="16"  # Number of learnable context tokens
+MERU_ENTAIL_WEIGHT="0.2"  # Weight for Emotion → Image entailment loss
+
+# --------------------------------------------------
+# Evaluation Parameters
+# --------------------------------------------------
+EVAL_BATCH_SIZE="128"
+
+# ========================================
+# END OF CONFIGURATION
+# ========================================
+# No need to edit below this line unless you know what you're doing
+
+# ========================================
+# SETUP PYTHON PATH
+# ========================================
+# Get the directory where this script is located
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+# Get the repo root (2 levels up from scripts/emotion_experiments/)
+REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
+# Add repo root to PYTHONPATH so meru module can be imported
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+echo "Repository root: $REPO_ROOT"
+echo "PYTHONPATH: $PYTHONPATH"
+echo ""
 
 # ========================================
 # DISPLAY CONFIGURATION
@@ -71,29 +120,172 @@ echo "Estimated time: 2-4 hours (depending on hardware and dataset size)"
 echo ""
 echo "Configuration:"
 echo "  Dataset: $EMOSET_ROOT"
-echo "  CLIP checkpoint: ${PRETRAINED_CLIP:-[NOT SET]}"
-echo "  MERU checkpoint: ${PRETRAINED_MERU:-[NOT SET]}"
+echo "  CLIP checkpoint: ${PRETRAINED_CLIP:-[NOT SET - will offer download]}"
+echo "  MERU checkpoint: ${PRETRAINED_MERU:-[NOT SET - will offer download]}"
+echo "  Checkpoint dir: $CHECKPOINT_DIR"
 echo "  Output base: $OUTPUT_BASE"
 echo "  CLIP epochs: $CLIP_NUM_EPOCHS (batch: $CLIP_BATCH_SIZE, lr: $CLIP_LEARNING_RATE)"
 echo "  MERU epochs: $MERU_NUM_EPOCHS (batch: $MERU_BATCH_SIZE, lr: $MERU_LEARNING_RATE, entail: $MERU_ENTAIL_WEIGHT)"
 echo ""
 
-# Check required environment variables
-if [ -z "$PRETRAINED_CLIP" ] || [ -z "$PRETRAINED_MERU" ]; then
-    echo "ERROR: Required environment variables not set"
+# ========================================
+# DOWNLOAD PRETRAINED WEIGHTS (OPTIONAL)
+# ========================================
+
+# Check if checkpoints are not set or don't exist
+NEED_DOWNLOAD=false
+
+if [ -z "$PRETRAINED_CLIP" ] || [ ! -f "$PRETRAINED_CLIP" ]; then
+    if [ -z "$PRETRAINED_CLIP" ]; then
+        echo "⚠️  PRETRAINED_CLIP not set"
+    else
+        echo "⚠️  CLIP checkpoint not found at: $PRETRAINED_CLIP"
+    fi
+    NEED_DOWNLOAD=true
+fi
+
+if [ -z "$PRETRAINED_MERU" ] || [ ! -f "$PRETRAINED_MERU" ]; then
+    if [ -z "$PRETRAINED_MERU" ]; then
+        echo "⚠️  PRETRAINED_MERU not set"
+    else
+        echo "⚠️  MERU checkpoint not found at: $PRETRAINED_MERU"
+    fi
+    NEED_DOWNLOAD=true
+fi
+
+if [ "$NEED_DOWNLOAD" = true ]; then
     echo ""
-    echo "Please set:"
-    echo "  export PRETRAINED_CLIP=path/to/clip_checkpoint.pth"
-    echo "  export PRETRAINED_MERU=path/to/meru_checkpoint.pth"
+    echo "=========================================="
+    echo "DOWNLOAD PRETRAINED WEIGHTS"
+    echo "=========================================="
     echo ""
-    echo "Optional configuration:"
-    echo "  export EMOSET_ROOT=path/to/emoset  # Default: datasets/emoset"
-    echo "  export OUTPUT_BASE=path/to/output  # Default: output"
-    echo "  export CLIP_NUM_EPOCHS=50           # Default: 50"
-    echo "  export MERU_NUM_EPOCHS=100          # Default: 100"
+    echo "The emotion experiments use ViT-Base models."
     echo ""
+    echo "Available models:"
+    echo "  • CLIP ViT-Base  (~500 MB)"
+    echo "  • MERU ViT-Base  (~500 MB)"
+    echo ""
+    echo "Source: https://dl.fbaipublicfiles.com/meru/"
+    echo "Destination: $CHECKPOINT_DIR/"
+    echo ""
+
+    # Check if auto-download is enabled
+    if [ "$AUTO_DOWNLOAD" = "true" ]; then
+        echo "AUTO_DOWNLOAD=true: Downloading automatically..."
+        echo "  (Set AUTO_DOWNLOAD=false to prompt instead)"
+        echo ""
+        DOWNLOAD_CONFIRMED=true
+    else
+        read -p "Download pretrained weights? (y/n) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            DOWNLOAD_CONFIRMED=true
+        else
+            DOWNLOAD_CONFIRMED=false
+        fi
+    fi
+
+    if [ "$DOWNLOAD_CONFIRMED" = true ]; then
+        # Create checkpoint directory
+        mkdir -p "$CHECKPOINT_DIR"
+
+        echo ""
+        echo "Downloading pretrained weights..."
+        echo ""
+
+        # Download CLIP ViT-Base if needed
+        if [ -z "$PRETRAINED_CLIP" ] || [ ! -f "$PRETRAINED_CLIP" ]; then
+            CLIP_URL="https://dl.fbaipublicfiles.com/meru/clip_vit_b.pth"
+            CLIP_PATH="$CHECKPOINT_DIR/clip_vit_b.pth"
+
+            echo "Downloading CLIP ViT-Base..."
+            echo "  URL: $CLIP_URL"
+            echo "  Destination: $CLIP_PATH"
+
+            if command -v wget &> /dev/null; then
+                wget -O "$CLIP_PATH" "$CLIP_URL" || {
+                    echo "❌ Download failed"
+                    exit 1
+                }
+            elif command -v curl &> /dev/null; then
+                curl -L -o "$CLIP_PATH" "$CLIP_URL" || {
+                    echo "❌ Download failed"
+                    exit 1
+                }
+            else
+                echo "❌ ERROR: Neither wget nor curl found. Please install one of them."
+                exit 1
+            fi
+
+            echo "✓ CLIP ViT-Base downloaded successfully"
+            export PRETRAINED_CLIP="$CLIP_PATH"
+        fi
+
+        # Download MERU ViT-Base if needed
+        if [ -z "$PRETRAINED_MERU" ] || [ ! -f "$PRETRAINED_MERU" ]; then
+            MERU_URL="https://dl.fbaipublicfiles.com/meru/meru_vit_b.pth"
+            MERU_PATH="$CHECKPOINT_DIR/meru_vit_b.pth"
+
+            echo ""
+            echo "Downloading MERU ViT-Base..."
+            echo "  URL: $MERU_URL"
+            echo "  Destination: $MERU_PATH"
+
+            if command -v wget &> /dev/null; then
+                wget -O "$MERU_PATH" "$MERU_URL" || {
+                    echo "❌ Download failed"
+                    exit 1
+                }
+            elif command -v curl &> /dev/null; then
+                curl -L -o "$MERU_PATH" "$MERU_URL" || {
+                    echo "❌ Download failed"
+                    exit 1
+                }
+            else
+                echo "❌ ERROR: Neither wget nor curl found. Please install one of them."
+                exit 1
+            fi
+
+            echo "✓ MERU ViT-Base downloaded successfully"
+            export PRETRAINED_MERU="$MERU_PATH"
+        fi
+
+        echo ""
+        echo "✓ All weights downloaded successfully!"
+        echo ""
+        echo "Updated configuration:"
+        echo "  CLIP checkpoint: $PRETRAINED_CLIP"
+        echo "  MERU checkpoint: $PRETRAINED_MERU"
+        echo ""
+    else
+        echo ""
+        echo "Download skipped. Please set checkpoint paths manually:"
+        echo "  export PRETRAINED_CLIP=path/to/clip_checkpoint.pth"
+        echo "  export PRETRAINED_MERU=path/to/meru_checkpoint.pth"
+        echo ""
+        exit 1
+    fi
+fi
+
+# ========================================
+# VERIFY CHECKPOINTS
+# ========================================
+
+# Final check: ensure checkpoints exist
+if [ ! -f "$PRETRAINED_CLIP" ]; then
+    echo "❌ ERROR: CLIP checkpoint not found at: $PRETRAINED_CLIP"
     exit 1
 fi
+
+if [ ! -f "$PRETRAINED_MERU" ]; then
+    echo "❌ ERROR: MERU checkpoint not found at: $PRETRAINED_MERU"
+    exit 1
+fi
+
+echo "✓ Checkpoints verified:"
+echo "  CLIP: $PRETRAINED_CLIP"
+echo "  MERU: $PRETRAINED_MERU"
+echo ""
 
 # Ask for confirmation
 read -p "Continue with full pipeline? (y/n) " -n 1 -r

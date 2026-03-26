@@ -4,6 +4,11 @@
 
 set -e  # Exit on error
 
+# Setup Python path
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
+export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+
 # Parse arguments
 MODEL_TYPE="${1:-clip_coop}"  # clip_coop or meru_coop
 SPLIT="${2:-test}"            # train, val, or test
