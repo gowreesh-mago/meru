@@ -46,10 +46,10 @@ class EmoSet(Dataset):
         data_store = json.load(open(os.path.join(data_root, f'{phase}.json')))
         self.data_store = [
             [
-                self.info['emotion']['label2idx'][item[0]],
-                item[1],
-                os.path.join(data_root, item[2]),
-                os.path.join(data_root, item[3])
+                self.info['emotion']['label2idx'][item[0]],  # emotion label idx
+                os.path.splitext(os.path.basename(item[1]))[0],  # image_id from filename
+                os.path.join(data_root, item[1]),  # image path
+                os.path.join(data_root, item[2])   # annotation path
             ]
             for item in data_store
         ]
@@ -82,12 +82,13 @@ class EmoSet(Dataset):
         assert num_emotion_classes in (8, 2)
         info = json.load(open(os.path.join(data_root, 'info.json')))
         if num_emotion_classes == 8:
-            # Wrap the flat structure in 'emotion' key for consistency
+            # Extract root-level label2idx/idx2label into 'emotion' key
+            # while preserving all other attribute keys (facial_expression, scene, etc.)
             emotion_info = {
-                'label2idx': info['label2idx'],
-                'idx2label': info['idx2label']
+                'label2idx': info.pop('label2idx'),
+                'idx2label': info.pop('idx2label')
             }
-            info = {'emotion': emotion_info}
+            info['emotion'] = emotion_info
         elif num_emotion_classes == 2:
             emotion_info = {
                 'label2idx': {
@@ -128,17 +129,19 @@ class EmoSet(Dataset):
 
         for attribute in self.ATTRIBUTES_MULTI_CLASS:
             # if empty, set to -1, else set to label index
+            # Skip if attribute mapping not available in info.json
             attribute_label_idx = -1
-            if attribute in annotation_data:
+            if attribute in annotation_data and attribute in self.info:
                 attribute_label_idx = self.info[attribute]['label2idx'][str(annotation_data[attribute])]
             data.update({f'{attribute}_label_idx': attribute_label_idx})
 
         for attribute in self.ATTRIBUTES_MULTI_LABEL:
             # if empty, set to 0, else set to 1
+            # Skip if attribute mapping not available in info.json
             assert attribute == 'object'
             num_classes = self.NUM_CLASSES[attribute]
             attribute_label_idx = torch.zeros(num_classes)
-            if attribute in annotation_data:
+            if attribute in annotation_data and attribute in self.info:
                 for label in annotation_data[attribute]:
                     attribute_label_idx[self.info[attribute]['label2idx'][label]] = 1
             data.update({f'{attribute}_label_idx': attribute_label_idx})

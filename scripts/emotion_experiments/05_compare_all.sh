@@ -2,7 +2,8 @@
 # Compare all emotion classification variants
 # Runs zero-shot, CLIP+CoOp, and MERU+CoOp evaluation and generates comparison
 
-set -e  # Exit on error
+set -e          # Exit on error
+set -o pipefail # Exit on error in any part of a pipeline
 
 # Setup Python path
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -80,15 +81,20 @@ echo "2/3: CLIP+CoOp Evaluation"
 echo "=========================================="
 echo ""
 
-CLIP_COOP_CHECKPOINT="output/clip_coop/checkpoints/best_model.pth"
+# Use environment variable if set, otherwise use default path
+CLIP_COOP_CHECKPOINT="${CLIP_COOP_CHECKPOINT:-output/clip_coop/checkpoints/best_model.pth}"
 if [ -f "$CLIP_COOP_CHECKPOINT" ]; then
+    export CHECKPOINT="$CLIP_COOP_CHECKPOINT"
     bash scripts/emotion_experiments/04_evaluate.sh clip_coop "$SPLIT"
 
-    # Copy results
-    cp output/clip_coop/checkpoints/eval_results_${SPLIT}.txt "$COMPARISON_DIR/clip_coop_results.txt" 2>/dev/null || true
+    # Copy results from the checkpoint's directory
+    CHECKPOINT_DIR="$(dirname "$CLIP_COOP_CHECKPOINT")"
+    cp "$CHECKPOINT_DIR/eval_results_${SPLIT}.txt" "$COMPARISON_DIR/clip_coop_results.txt" 2>/dev/null || true
 else
-    echo "WARNING: CLIP+CoOp checkpoint not found. Run training first:"
+    echo "WARNING: CLIP+CoOp checkpoint not found at: $CLIP_COOP_CHECKPOINT"
+    echo "Run training first:"
     echo "  bash scripts/emotion_experiments/02_train_clip_coop.sh"
+    echo "Or set CLIP_COOP_CHECKPOINT environment variable to your checkpoint path"
 fi
 
 echo ""
@@ -101,15 +107,20 @@ echo "3/3: MERU+CoOp Evaluation"
 echo "=========================================="
 echo ""
 
-MERU_COOP_CHECKPOINT="output/meru_coop/checkpoints/best_model.pth"
+# Use environment variable if set, otherwise use default path
+MERU_COOP_CHECKPOINT="${MERU_COOP_CHECKPOINT:-output/meru_coop/checkpoints/best_model.pth}"
 if [ -f "$MERU_COOP_CHECKPOINT" ]; then
+    export CHECKPOINT="$MERU_COOP_CHECKPOINT"
     bash scripts/emotion_experiments/04_evaluate.sh meru_coop "$SPLIT"
 
-    # Copy results
-    cp output/meru_coop/checkpoints/eval_results_${SPLIT}.txt "$COMPARISON_DIR/meru_coop_results.txt" 2>/dev/null || true
+    # Copy results from the checkpoint's directory
+    CHECKPOINT_DIR="$(dirname "$MERU_COOP_CHECKPOINT")"
+    cp "$CHECKPOINT_DIR/eval_results_${SPLIT}.txt" "$COMPARISON_DIR/meru_coop_results.txt" 2>/dev/null || true
 else
-    echo "WARNING: MERU+CoOp checkpoint not found. Run training first:"
+    echo "WARNING: MERU+CoOp checkpoint not found at: $MERU_COOP_CHECKPOINT"
+    echo "Run training first:"
     echo "  bash scripts/emotion_experiments/03_train_meru_coop.sh"
+    echo "Or set MERU_COOP_CHECKPOINT environment variable to your checkpoint path"
 fi
 
 echo ""

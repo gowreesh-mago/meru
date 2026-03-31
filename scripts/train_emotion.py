@@ -18,16 +18,18 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+from hydra.utils import instantiate
 from loguru import logger
+from omegaconf.errors import ConfigAttributeError
 from sklearn.metrics import accuracy_score, f1_score
 from torch.cuda import amp
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
 # Register Emoset dataset
 import meru.emotion.dataset_integration  # noqa: F401
 from emoset.Emoset import EmoSet
-from meru.config import LazyConfig, LazyFactory
+from meru.config import LazyConfig
 from meru.emotion.emotion_coop_models import CLIPCoOpEmotion, MERUCoOpEmotion
 from meru.utils.checkpointing import CheckpointManager
 
@@ -38,6 +40,7 @@ parser.add_argument("--output-dir", default="./output", help="Path to save check
 parser.add_argument("--log-dir", default=None, help="Directory to save log files. If not specified, logs only to console and tensorboard.")
 parser.add_argument("--resume", action="store_true", help="Resume training from last checkpoint.")
 parser.add_argument("--pretrained", default="", help="Path to pretrained model checkpoint.")
+parser.add_argument("--num-samples", type=int, default=None, help="Limit dataset to N samples (useful for quick testing).")
 # fmt: on
 
 
@@ -59,7 +62,6 @@ def main(_A: argparse.Namespace):
     # Create output directory
     output_dir = Path(_A.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    LazyConfig.save(_C, output_dir / "config.yaml")
 
     # Setup logging to file if log_dir is specified
     if _A.log_dir is not None:
@@ -70,6 +72,62 @@ def main(_A: argparse.Namespace):
         logger.info(f"Logging to file: {log_file}")
 
     logger.info(f"Using device: {device}")
+
+    # -------------------------------------------------------------------------
+    #   OVERRIDE CONFIG FROM ENVIRONMENT VARIABLES
+    # -------------------------------------------------------------------------
+    # Override data_root from environment variable if set (for shell scripts)
+    import os
+    if "EMOSET_ROOT" in os.environ:
+        _C.dataset["data_root"] = os.environ["EMOSET_ROOT"]
+        logger.info(f"Overriding data_root from EMOSET_ROOT: {os.environ['EMOSET_ROOT']}")
+    elif "DATASET_ROOT" in os.environ:
+        _C.dataset["data_root"] = os.environ["DATASET_ROOT"]
+        logger.info(f"Overriding data_root from DATASET_ROOT: {os.environ['DATASET_ROOT']}")
+
+    # Override training hyperparameters from environment variables
+    if "NUM_EPOCHS" in os.environ:
+        _C.train["num_epochs"] = int(os.environ["NUM_EPOCHS"])
+        logger.info(f"Overriding num_epochs from NUM_EPOCHS: {os.environ['NUM_EPOCHS']}")
+
+    if "BATCH_SIZE" in os.environ:
+        _C.dataset["batch_size"] = int(os.environ["BATCH_SIZE"])
+        logger.info(f"Overriding batch_size from BATCH_SIZE: {os.environ['BATCH_SIZE']}")
+
+    if "LEARNING_RATE" in os.environ:
+        _C.optim["optimizer"].lr = float(os.environ["LEARNING_RATE"])
+        logger.info(f"Overriding learning_rate from LEARNING_RATE: {os.environ['LEARNING_RATE']}")
+
+    if "EVAL_PERIOD" in os.environ:
+        _C.train["eval_period"] = int(os.environ["EVAL_PERIOD"])
+        logger.info(f"Overriding eval_period from EVAL_PERIOD: {os.environ['EVAL_PERIOD']}")
+
+    if "CHECKPOINT_PERIOD" in os.environ:
+        _C.train["checkpoint_period"] = int(os.environ["CHECKPOINT_PERIOD"])
+        logger.info(f"Overriding checkpoint_period from CHECKPOINT_PERIOD: {os.environ['CHECKPOINT_PERIOD']}")
+
+    if "NUM_WORKERS" in os.environ:
+        _C.train["num_workers"] = int(os.environ["NUM_WORKERS"])
+        logger.info(f"Overriding num_workers from NUM_WORKERS: {os.environ['NUM_WORKERS']}")
+
+    if "SEED" in os.environ:
+        _C.train["seed"] = int(os.environ["SEED"])
+        seed = _C.train["seed"]
+        logger.info(f"Overriding seed from SEED: {os.environ['SEED']}")
+
+    if "NUM_CTX" in os.environ:
+        _C.model.n_ctx = int(os.environ["NUM_CTX"])
+        logger.info(f"Overriding n_ctx from NUM_CTX: {os.environ['NUM_CTX']}")
+
+    if "ENTAIL_WEIGHT" in os.environ:
+        # Only applies to MERU model
+        if hasattr(_C.model, "entail_weight"):
+            _C.model.entail_weight = float(os.environ["ENTAIL_WEIGHT"])
+            logger.info(f"Overriding entail_weight from ENTAIL_WEIGHT: {os.environ['ENTAIL_WEIGHT']}")
+
+    # Save config AFTER environment variable overrides are applied
+    LazyConfig.save(_C, output_dir / "config.yaml")
+    logger.info(f"Saved config to: {output_dir / 'config.yaml'}")
 
     # -------------------------------------------------------------------------
     #   BUILD DATASET AND DATALOADER
@@ -86,6 +144,14 @@ def main(_A: argparse.Namespace):
         num_emotion_classes=_C.dataset["num_emotion_classes"],
         phase="val",
     )
+
+    # Limit dataset size if --num-samples is specified
+    if _A.num_samples is not None:
+        logger.info(f"Limiting dataset to {_A.num_samples} samples for quick testing")
+        train_indices = list(range(min(_A.num_samples, len(train_dataset))))
+        val_indices = list(range(min(_A.num_samples, len(val_dataset))))
+        train_dataset = Subset(train_dataset, train_indices)
+        val_dataset = Subset(val_dataset, val_indices)
 
     batch_size = _C.dataset["batch_size"]
     num_workers = _C.train.get("num_workers", 4)
@@ -112,16 +178,9 @@ def main(_A: argparse.Namespace):
     # -------------------------------------------------------------------------
     logger.info("Building model...")
 
-    # First build base model (CLIPBaseline or MERU)
-    if hasattr(_C, "clip_base_model"):
-        base_model = LazyFactory(eval(_C.clip_base_model))
-    elif hasattr(_C, "meru_base_model"):
-        base_model = LazyFactory(eval(_C.meru_base_model))
-    else:
-        raise ValueError("Config must have either clip_base_model or meru_base_model")
-
-    # Build emotion model wrapper
-    model = LazyFactory(eval(_C.model))
+    # Build emotion model (which internally builds the base model)
+    # The config uses references like "${..clip_base_model}" so instantiate handles it
+    model = instantiate(_C.model)
     model = model.to(device)
 
     # Load pretrained weights if specified
@@ -138,6 +197,11 @@ def main(_A: argparse.Namespace):
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     logger.info(f"Total params: {total_params:,} | Trainable: {trainable_params:,}")
+
+    # Save initial model (epoch 0) for evaluation
+    (output_dir / "checkpoints").mkdir(parents=True, exist_ok=True)
+    torch.save({"epoch": 0, "model": model.state_dict()}, output_dir / "checkpoints" / "initial_model.pth")
+    logger.info(f"Saved initial model to {output_dir / 'checkpoints' / 'initial_model.pth'}")
 
     # -------------------------------------------------------------------------
     #   BUILD OPTIMIZER AND SCHEDULER
@@ -163,17 +227,36 @@ def main(_A: argparse.Namespace):
                 "weight_decay": 0.0,
             },
         ]
-        optimizer = torch.optim.AdamW(param_groups, **_C.optim["optimizer"]._kwds)
+        # Build optimizer with param groups
+        # Extract optimizer kwargs from LazyCall config
+        optimizer_kwargs = {
+            "betas": _C.optim["optimizer"].betas,
+        }
+        optimizer = torch.optim.AdamW(param_groups, **optimizer_kwargs)
     else:
         # Single param group for CLIP
-        optimizer = LazyFactory(eval(_C.optim["optimizer"]))(model.prompt_learner.parameters())
+        optimizer = instantiate(_C.optim["optimizer"], params=model.prompt_learner.parameters())
 
     # Update steps_per_epoch in config
     steps_per_epoch = len(train_loader)
     _C.train["steps_per_epoch"] = steps_per_epoch
 
+    # Update scheduler parameters if they need to be computed dynamically
+    # This is needed for LinearWarmupCosineDecayLR (MERU), but not for CosineAnnealingLR (CLIP)
+    try:
+        if _C.optim["lr_scheduler"].total_steps == 0:
+            # Compute total_steps and warmup_steps for LinearWarmupCosineDecayLR
+            total_steps = _C.train["num_epochs"] * steps_per_epoch
+            warmup_steps = total_steps // 10  # 10% warmup
+            _C.optim["lr_scheduler"].total_steps = total_steps
+            _C.optim["lr_scheduler"].warmup_steps = warmup_steps
+            logger.info(f"Computed scheduler steps: total={total_steps}, warmup={warmup_steps}")
+    except (AttributeError, KeyError, ConfigAttributeError):
+        # Scheduler doesn't have total_steps (e.g., CosineAnnealingLR)
+        pass
+
     # Build scheduler
-    scheduler = LazyFactory(eval(_C.optim["lr_scheduler"]))(optimizer)
+    scheduler = instantiate(_C.optim["lr_scheduler"], optimizer=optimizer)
 
     # Setup AMP scaler
     scaler = amp.GradScaler(enabled=_C.train.get("amp", True))

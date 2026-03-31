@@ -1,12 +1,7 @@
 #!/bin/bash
-# Master script to run complete emotion classification pipeline
-# This will:
-# 1. Setup and verify environment
-# 2. Run zero-shot baseline
-# 3. Train CLIP+CoOp
-# 4. Train MERU+CoOp
-# 5. Evaluate all models
-# 6. Generate comparison report
+# Sanity check script for emotion classification pipeline
+# This is a FAST version of run_all_experiments.sh for testing setup
+# Uses minimal epochs and batch sizes to quickly verify everything works
 
 set -e          # Exit on error
 set -o pipefail # Exit on error in any part of a pipeline
@@ -14,13 +9,7 @@ set -o pipefail # Exit on error in any part of a pipeline
 # ========================================
 # CONFIGURATION SECTION
 # ========================================
-# Edit the variables below to customize your experiment
-# No need to use "export" commands - just edit and run!
-#
-# Quick Start:
-#   1. Edit paths/parameters below (or leave defaults)
-#   2. Run: bash scripts/emotion_experiments/run_all_experiments.sh
-#   3. Done!
+# Quick sanity check settings - minimal training for fast verification
 
 # --------------------------------------------------
 # Dataset Configuration
@@ -32,8 +21,8 @@ EMOSET_ROOT="/ivi/zfs/s0/original_homes/gmago/emoset"
 # Pretrained Checkpoints
 # --------------------------------------------------
 # Leave empty for auto-download, or set to your checkpoint paths
-PRETRAINED_CLIP=""
-PRETRAINED_MERU=""
+PRETRAINED_CLIP="/ivi/zfs/s0/original_homes/gmago/models/clip_vit_b.pth"
+PRETRAINED_MERU="/ivi/zfs/s0/original_homes/gmago/models/meru_vit_b.pth"
 # Examples:
 # PRETRAINED_CLIP="/path/to/my/clip_model.pth"
 # PRETRAINED_MERU="/path/to/my/meru_model.pth"
@@ -51,42 +40,43 @@ AUTO_DOWNLOAD="true"
 OUTPUT_BASE="/home/gmago/Emotions/outputs"
 # Base directory for all outputs
 
-EXPERIMENT_BASE="$OUTPUT_BASE/experiments"
-# Directory for timestamped experiment runs
-
-LOG_DIR_CLIP=""
-LOG_DIR_MERU=""
+EXPERIMENT_BASE="$OUTPUT_BASE/sanity_checks"
+# Directory for sanity check runs
+export MAX_TRAIN_SAMPLES=10
+export MAX_EVAL_SAMPLES=10
+LOG_DIR_CLIP="/home/gmago/Emotions/outputs/logs/clip"
+LOG_DIR_MERU="/home/gmago/Emotions/outputs/logs/meru"
 # Leave empty to use default (OUTPUT_DIR/logs)
-# Or set custom paths:
-# LOG_DIR_CLIP="/logs/clip_experiments"
-# LOG_DIR_MERU="/logs/meru_experiments"
 
 # --------------------------------------------------
-# CLIP+CoOp Training Parameters
+# SANITY CHECK TRAINING PARAMETERS
 # --------------------------------------------------
-CLIP_NUM_EPOCHS="50"
-CLIP_BATCH_SIZE="32"
+# Using minimal settings for FAST verification
+CLIP_NUM_EPOCHS="1"           # Just 1 epoch to test training loop
+CLIP_BATCH_SIZE="16"          # Smaller batch for faster iteration
 CLIP_LEARNING_RATE="0.002"
-CLIP_NUM_CTX="16"  # Number of learnable context tokens
+CLIP_NUM_CTX="16"              # Fewer context tokens for speed
 
-# --------------------------------------------------
-# MERU+CoOp Training Parameters
-# --------------------------------------------------
-MERU_NUM_EPOCHS="100"
-MERU_BATCH_SIZE="32"
+MERU_NUM_EPOCHS="1"           # Just 1 epoch to test training loop
+MERU_BATCH_SIZE="16"          # Smaller batch for faster iteration
 MERU_LEARNING_RATE="0.002"
-MERU_NUM_CTX="16"  # Number of learnable context tokens
-MERU_ENTAIL_WEIGHT="0.2"  # Weight for Emotion → Image entailment loss
+MERU_NUM_CTX="4"              # Fewer context tokens for speed
+MERU_ENTAIL_WEIGHT="0.2"
 
 # --------------------------------------------------
 # Evaluation Parameters
 # --------------------------------------------------
-EVAL_BATCH_SIZE="128"
+EVAL_BATCH_SIZE="64"          # Smaller for faster eval
+
+# --------------------------------------------------
+# Sample Limits (for faster sanity checks)
+# --------------------------------------------------
+MAX_TRAIN_SAMPLES="100"       # Limit training samples per epoch
+MAX_EVAL_SAMPLES="50"         # Limit evaluation samples
 
 # ========================================
 # END OF CONFIGURATION
 # ========================================
-# No need to edit below this line unless you know what you're doing
 
 # ========================================
 # SETUP PYTHON PATH
@@ -130,18 +120,19 @@ echo ""
 # ========================================
 
 echo "=========================================="
-echo "EMOTION CLASSIFICATION - FULL PIPELINE"
+echo "EMOTION CLASSIFICATION - SANITY CHECK"
 echo "=========================================="
 echo ""
-echo "This script will run the complete experimental pipeline:"
-echo "  1. Setup and verification"
-echo "  2. Zero-shot CLIP evaluation (baseline)"
-echo "  3. Train CLIP + CoOp ($CLIP_NUM_EPOCHS epochs)"
-echo "  4. Train MERU + CoOp ($MERU_NUM_EPOCHS epochs)"
-echo "  5. Evaluate all models"
-echo "  6. Generate comparison report"
+echo "This is a FAST sanity check that will:"
+echo "  0. Check Python imports and dependencies"
+echo "  1. Verify environment setup"
+echo "  2. Test zero-shot CLIP evaluation"
+echo "  3. Test CLIP + CoOp training (${CLIP_NUM_EPOCHS} epoch only, ${MAX_TRAIN_SAMPLES} samples)"
+echo "  4. Test MERU + CoOp training (${MERU_NUM_EPOCHS} epoch only, ${MAX_TRAIN_SAMPLES} samples)"
+echo "  5. Test evaluation pipeline (${MAX_EVAL_SAMPLES} samples)"
+echo "  6. Generate quick comparison"
 echo ""
-echo "Estimated time: 2-4 hours (depending on hardware and dataset size)"
+echo "Estimated time: 5-10 minutes (vs 2-4 hours for full pipeline)"
 echo ""
 echo "Configuration:"
 echo "  Dataset: $EMOSET_ROOT"
@@ -149,8 +140,12 @@ echo "  CLIP checkpoint: ${PRETRAINED_CLIP:-[NOT SET - will offer download]}"
 echo "  MERU checkpoint: ${PRETRAINED_MERU:-[NOT SET - will offer download]}"
 echo "  Checkpoint dir: $CHECKPOINT_DIR"
 echo "  Output base: $OUTPUT_BASE"
-echo "  CLIP epochs: $CLIP_NUM_EPOCHS (batch: $CLIP_BATCH_SIZE, lr: $CLIP_LEARNING_RATE)"
-echo "  MERU epochs: $MERU_NUM_EPOCHS (batch: $MERU_BATCH_SIZE, lr: $MERU_LEARNING_RATE, entail: $MERU_ENTAIL_WEIGHT)"
+echo "  CLIP: $CLIP_NUM_EPOCHS epoch (batch: $CLIP_BATCH_SIZE, ctx: $CLIP_NUM_CTX)"
+echo "  MERU: $MERU_NUM_EPOCHS epoch (batch: $MERU_BATCH_SIZE, ctx: $MERU_NUM_CTX)"
+echo "  Sample limits: train=$MAX_TRAIN_SAMPLES, eval=$MAX_EVAL_SAMPLES"
+echo ""
+echo "⚠️  NOTE: This is for testing only - results won't be meaningful!"
+echo "    Use run_all_experiments.sh for actual experiments."
 echo ""
 
 # ========================================
@@ -313,7 +308,7 @@ echo "  MERU: $PRETRAINED_MERU"
 echo ""
 
 # Ask for confirmation
-read -p "Continue with full pipeline? (y/n) " -n 1 -r
+read -p "Continue with sanity check? (y/n) " -n 1 -r
 echo
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Aborted."
@@ -326,11 +321,11 @@ echo ""
 # SETUP EXPERIMENT DIRECTORY
 # ========================================
 START_TIME=$(date +%s)
-EXPERIMENT_ID="exp_$(date +%Y%m%d_%H%M%S)"
+EXPERIMENT_ID="sanity_$(date +%Y%m%d_%H%M%S)"
 EXPERIMENT_DIR="$EXPERIMENT_BASE/$EXPERIMENT_ID"
 mkdir -p "$EXPERIMENT_DIR"
 
-echo "Experiment ID: $EXPERIMENT_ID"
+echo "Sanity check ID: $EXPERIMENT_ID"
 echo "Results will be saved to: $EXPERIMENT_DIR"
 echo ""
 
@@ -338,6 +333,10 @@ echo ""
 export EMOSET_ROOT
 export PRETRAINED_CLIP
 export PRETRAINED_MERU
+
+# Export sample limits for faster sanity checks
+export MAX_TRAIN_SAMPLES
+export MAX_EVAL_SAMPLES
 
 # Function to log with timestamp
 log_step() {
@@ -350,11 +349,22 @@ log_step() {
 
 # Function to check if step completed successfully
 check_step() {
+    local step_name="$1"
     if [ $? -eq 0 ]; then
-        echo "✓ Step completed successfully"
+        echo ""
+        echo "✓ ${step_name} completed successfully"
+        echo ""
         return 0
     else
-        echo "✗ Step failed"
+        echo ""
+        echo "❌ ${step_name} FAILED"
+        echo "Check the log above for errors."
+        echo "Common issues:"
+        echo "  - Missing Python packages (run check_imports.py)"
+        echo "  - Invalid dataset path"
+        echo "  - Missing checkpoint files"
+        echo "  - CUDA/GPU issues"
+        echo ""
         return 1
     fi
 }
@@ -365,21 +375,21 @@ check_step() {
 log_step "STEP 1/6: Setup and Verification"
 
 bash scripts/emotion_experiments/00_setup.sh | tee "$EXPERIMENT_DIR/00_setup.log"
-check_step || exit 1
+check_step "Setup and Verification" || exit 1
 
 # ========================================
 # STEP 2: Zero-Shot Baseline
 # ========================================
-log_step "STEP 2/6: Zero-Shot CLIP Evaluation"
+log_step "STEP 2/6: Zero-Shot CLIP Evaluation (Quick Test)"
 
 export PRETRAINED_CHECKPOINT="$PRETRAINED_CLIP"
 bash scripts/emotion_experiments/01_zero_shot.sh | tee "$EXPERIMENT_DIR/01_zero_shot.log"
-check_step || exit 1
+check_step "Zero-Shot Evaluation" || exit 1
 
 # ========================================
-# STEP 3: Train CLIP+CoOp
+# STEP 3: Train CLIP+CoOp (Quick Test)
 # ========================================
-log_step "STEP 3/6: Training CLIP + CoOp"
+log_step "STEP 3/6: Testing CLIP + CoOp Training (${CLIP_NUM_EPOCHS} epochs)"
 
 # Set CLIP-specific configuration
 export OUTPUT_DIR="$EXPERIMENT_DIR/clip_coop"
@@ -390,21 +400,20 @@ export NUM_CTX="$CLIP_NUM_CTX"
 [ -n "$LOG_DIR_CLIP" ] && export LOG_DIR="$LOG_DIR_CLIP" || export LOG_DIR="$OUTPUT_DIR/logs"
 
 bash scripts/emotion_experiments/02_train_clip_coop.sh | tee "$EXPERIMENT_DIR/02_train_clip_coop.log"
-check_step || exit 1
+check_step "CLIP+CoOp Training" || exit 1
 
-# Evaluate on validation and test
-log_step "STEP 3.1/6: Evaluating CLIP+CoOp"
+# Quick evaluation on validation only
+log_step "STEP 3.1/6: Testing CLIP+CoOp Evaluation"
 
 export CHECKPOINT="$OUTPUT_DIR/checkpoints/best_model.pth"
 export BATCH_SIZE="$EVAL_BATCH_SIZE"
 export LOG_DIR="$OUTPUT_DIR/logs"
 bash scripts/emotion_experiments/04_evaluate.sh clip_coop val | tee "$EXPERIMENT_DIR/02_eval_clip_val.log"
-bash scripts/emotion_experiments/04_evaluate.sh clip_coop test | tee "$EXPERIMENT_DIR/02_eval_clip_test.log"
 
 # ========================================
-# STEP 4: Train MERU+CoOp
+# STEP 4: Train MERU+CoOp (Quick Test)
 # ========================================
-log_step "STEP 4/6: Training MERU + CoOp"
+log_step "STEP 4/6: Testing MERU + CoOp Training (${MERU_NUM_EPOCHS} epochs)"
 
 # Set MERU-specific configuration
 export OUTPUT_DIR="$EXPERIMENT_DIR/meru_coop"
@@ -416,53 +425,58 @@ export ENTAIL_WEIGHT="$MERU_ENTAIL_WEIGHT"
 [ -n "$LOG_DIR_MERU" ] && export LOG_DIR="$LOG_DIR_MERU" || export LOG_DIR="$OUTPUT_DIR/logs"
 
 bash scripts/emotion_experiments/03_train_meru_coop.sh | tee "$EXPERIMENT_DIR/03_train_meru_coop.log"
-check_step || exit 1
+check_step "MERU+CoOp Training" || exit 1
 
-# Evaluate on validation and test
-log_step "STEP 4.1/6: Evaluating MERU+CoOp"
+# Quick evaluation on validation only
+log_step "STEP 4.1/6: Testing MERU+CoOp Evaluation"
 
 export CHECKPOINT="$OUTPUT_DIR/checkpoints/best_model.pth"
 export BATCH_SIZE="$EVAL_BATCH_SIZE"
 export LOG_DIR="$OUTPUT_DIR/logs"
 bash scripts/emotion_experiments/04_evaluate.sh meru_coop val | tee "$EXPERIMENT_DIR/03_eval_meru_val.log"
-bash scripts/emotion_experiments/04_evaluate.sh meru_coop test | tee "$EXPERIMENT_DIR/03_eval_meru_test.log"
 
 # ========================================
-# STEP 5: Generate Comparison Report
+# STEP 5: Quick Comparison
 # ========================================
-log_step "STEP 5/6: Generating Comparison Report"
+log_step "STEP 5/6: Testing Comparison Script"
 
 # Copy output dirs for comparison script
 cp -r output/zero_shot "$EXPERIMENT_DIR/" 2>/dev/null || true
 cp -r "$EXPERIMENT_DIR/clip_coop/checkpoints" "$EXPERIMENT_DIR/clip_coop_checkpoints" 2>/dev/null || true
 cp -r "$EXPERIMENT_DIR/meru_coop/checkpoints" "$EXPERIMENT_DIR/meru_coop_checkpoints" 2>/dev/null || true
 
+
 # Export checkpoint paths for comparison script to find
 export CLIP_COOP_CHECKPOINT="$EXPERIMENT_DIR/clip_coop/checkpoints/best_model.pth"
 export MERU_COOP_CHECKPOINT="$EXPERIMENT_DIR/meru_coop/checkpoints/best_model.pth"
 
-# Run comparison on test split
-export EVAL_SPLIT=test
+
+# Run comparison on validation split only (faster)
+export EVAL_SPLIT=val
 bash scripts/emotion_experiments/05_compare_all.sh | tee "$EXPERIMENT_DIR/05_comparison.log"
 
 # ========================================
 # STEP 6: Final Summary
 # ========================================
-log_step "STEP 6/6: Final Summary"
+log_step "STEP 6/6: Sanity Check Summary"
 
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
-HOURS=$((DURATION / 3600))
-MINUTES=$(((DURATION % 3600) / 60))
+MINUTES=$((DURATION / 60))
+SECONDS=$((DURATION % 60))
 
-cat > "$EXPERIMENT_DIR/SUMMARY.txt" << EOF
+cat > "$EXPERIMENT_DIR/SANITY_CHECK_SUMMARY.txt" << EOF
 ================================================================================
-EMOTION CLASSIFICATION - EXPERIMENT SUMMARY
+EMOTION CLASSIFICATION - SANITY CHECK SUMMARY
 ================================================================================
 
-Experiment ID: $EXPERIMENT_ID
+Sanity Check ID: $EXPERIMENT_ID
 Date: $(date)
-Duration: ${HOURS}h ${MINUTES}m
+Duration: ${MINUTES}m ${SECONDS}s
+
+⚠️  NOTE: This was a SANITY CHECK with minimal training.
+    Results are NOT meaningful for evaluation purposes.
+    Use run_all_experiments.sh for actual experiments.
 
 ================================================================================
 CONFIGURATION
@@ -472,51 +486,19 @@ Dataset: $EMOSET_ROOT
 Pretrained CLIP: $PRETRAINED_CLIP
 Pretrained MERU: $PRETRAINED_MERU
 
-Output Base: $OUTPUT_BASE
-Experiment Directory: $EXPERIMENT_DIR
-
-Evaluation Batch Size: $EVAL_BATCH_SIZE
+Output Directory: $EXPERIMENT_DIR
 
 ================================================================================
-MODELS TRAINED
+TESTS PERFORMED
 ================================================================================
 
-1. Zero-Shot CLIP (baseline)
-   - Hand-crafted prompts
-   - No training
-
-2. CLIP + CoOp
-   - Learnable prompts: $CLIP_NUM_CTX context tokens
-   - Trainable params: ~8K
-   - Training: $CLIP_NUM_EPOCHS epochs, SGD, lr=$CLIP_LEARNING_RATE
-   - Batch size: $CLIP_BATCH_SIZE
-
-3. MERU + CoOp
-   - Learnable prompts: $MERU_NUM_CTX context tokens
-   - Trainable params: ~8K + hyperbolic params
-   - Training: $MERU_NUM_EPOCHS epochs, AdamW, lr=$MERU_LEARNING_RATE
-   - Batch size: $MERU_BATCH_SIZE
-   - Entailment weight: $MERU_ENTAIL_WEIGHT
-
-================================================================================
-RESULTS (Test Set)
-================================================================================
-
-EOF
-
-# Extract and display final results
-echo "Extracting final results..."
-
-for model in zero_shot clip_coop meru_coop; do
-    result_file=$(find "$EXPERIMENT_DIR" -name "*${model}*eval_results_test.txt" 2>/dev/null | head -1)
-    if [ -f "$result_file" ]; then
-        echo "" >> "$EXPERIMENT_DIR/SUMMARY.txt"
-        echo "--- $model ---" >> "$EXPERIMENT_DIR/SUMMARY.txt"
-        grep -A 2 "Overall Accuracy" "$result_file" >> "$EXPERIMENT_DIR/SUMMARY.txt" 2>/dev/null || true
-    fi
-done
-
-cat >> "$EXPERIMENT_DIR/SUMMARY.txt" << EOF
+✓ Python imports and dependencies checked
+✓ Environment setup and verification
+✓ Zero-shot CLIP evaluation
+✓ CLIP + CoOp training pipeline (${CLIP_NUM_EPOCHS} epoch, batch ${CLIP_BATCH_SIZE}, ${MAX_TRAIN_SAMPLES} samples)
+✓ MERU + CoOp training pipeline (${MERU_NUM_EPOCHS} epoch, batch ${MERU_BATCH_SIZE}, ${MAX_TRAIN_SAMPLES} samples)
+✓ Model evaluation pipeline (${MAX_EVAL_SAMPLES} samples)
+✓ Comparison report generation
 
 ================================================================================
 FILES GENERATED
@@ -529,34 +511,43 @@ Logs:
   - MERU+CoOp training: $EXPERIMENT_DIR/03_train_meru_coop.log
   - Comparison: $EXPERIMENT_DIR/05_comparison.log
 
-Models:
+Models (NOT for production use):
   - CLIP+CoOp: $EXPERIMENT_DIR/clip_coop/checkpoints/best_model.pth
   - MERU+CoOp: $EXPERIMENT_DIR/meru_coop/checkpoints/best_model.pth
 
-Tensorboard:
-  - CLIP+CoOp: $EXPERIMENT_DIR/clip_coop/tensorboard
-  - MERU+CoOp: $EXPERIMENT_DIR/meru_coop/tensorboard
+================================================================================
+NEXT STEPS
+================================================================================
+
+If all tests passed, you're ready to run the full pipeline:
+
+  bash scripts/emotion_experiments/run_all_experiments.sh
+
+The full pipeline uses:
+  - CLIP: 50 epochs (vs $CLIP_NUM_EPOCHS epoch in this test)
+  - MERU: 100 epochs (vs $MERU_NUM_EPOCHS epoch in this test)
+  - Full training and evaluation sets (vs ${MAX_TRAIN_SAMPLES}/${MAX_EVAL_SAMPLES} samples)
+  - Full evaluation on test sets
+  - Takes 2-4 hours (vs ${MINUTES}m for this sanity check)
 
 ================================================================================
 EOF
 
 # Display summary
-cat "$EXPERIMENT_DIR/SUMMARY.txt"
+cat "$EXPERIMENT_DIR/SANITY_CHECK_SUMMARY.txt"
 
 echo ""
 echo "=========================================="
-echo "ALL EXPERIMENTS COMPLETE! ✓"
+echo "SANITY CHECK COMPLETE! ✓"
 echo "=========================================="
 echo ""
-echo "Total time: ${HOURS}h ${MINUTES}m"
+echo "Total time: ${MINUTES}m ${SECONDS}s"
+echo ""
+echo "All pipeline components working correctly."
+echo "You can now run the full experiment with confidence!"
 echo ""
 echo "Results saved to: $EXPERIMENT_DIR"
 echo ""
-echo "To view tensorboard:"
-echo "  tensorboard --logdir $EXPERIMENT_DIR"
+echo "To run full experiments:"
+echo "  bash scripts/emotion_experiments/run_all_experiments.sh"
 echo ""
-echo "To view comparison report:"
-echo "  cat $EXPERIMENT_DIR/comparison_*/comparison_report.txt"
-echo ""
-echo "To view summary:"
-echo "  cat $EXPERIMENT_DIR/SUMMARY.txt"

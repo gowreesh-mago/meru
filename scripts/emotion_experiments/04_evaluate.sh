@@ -2,7 +2,8 @@
 # Evaluate trained emotion classification models
 # Supports CLIP+CoOp and MERU+CoOp variants
 
-set -e  # Exit on error
+set -e          # Exit on error
+set -o pipefail # Exit on error in any part of a pipeline
 
 # Setup Python path
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -63,6 +64,9 @@ echo "  Dataset: $DATASET_ROOT"
 echo "  Split: $SPLIT"
 echo "  Batch size: $BATCH_SIZE"
 echo "  Log directory: $LOG_DIR"
+if [ ! -z "$MAX_EVAL_SAMPLES" ]; then
+    echo "  Max samples: $MAX_EVAL_SAMPLES (QUICK TEST MODE)"
+fi
 echo ""
 
 # Create log directory
@@ -72,13 +76,20 @@ mkdir -p "$LOG_DIR"
 echo "Running evaluation on $SPLIT split..."
 echo ""
 
-python scripts/evaluate_emotion.py \
-    --config "$CONFIG_FILE" \
-    --checkpoint "$CHECKPOINT" \
-    --data-root "$DATASET_ROOT" \
-    --split "$SPLIT" \
-    --batch-size "$BATCH_SIZE" \
-    --log-dir "$LOG_DIR"
+EVAL_CMD="python scripts/evaluate_emotion.py \
+    --config \"$CONFIG_FILE\" \
+    --checkpoint \"$CHECKPOINT\" \
+    --data-root \"$DATASET_ROOT\" \
+    --split \"$SPLIT\" \
+    --batch-size \"$BATCH_SIZE\" \
+    --log-dir \"$LOG_DIR\""
+
+# Add --num-samples if MAX_EVAL_SAMPLES is set
+if [ ! -z "$MAX_EVAL_SAMPLES" ]; then
+    EVAL_CMD="$EVAL_CMD --num-samples $MAX_EVAL_SAMPLES"
+fi
+
+eval $EVAL_CMD
 
 echo ""
 echo "=========================================="

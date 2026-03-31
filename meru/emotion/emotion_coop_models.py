@@ -30,6 +30,19 @@ from trainers.coop import PromptLearner, TextEncoder  # noqa: E402
 from meru import lorentz as L  # noqa: E402
 
 
+class TransformerWrapper(nn.Module):
+    """Wrapper to make ModuleList of resblocks callable as a single transformer."""
+
+    def __init__(self, resblocks):
+        super().__init__()
+        self.resblocks = resblocks
+
+    def forward(self, x):
+        for block in self.resblocks:
+            x = block(x)
+        return x
+
+
 class CLIPCoOpEmotion(nn.Module):
     """
     CLIP with learnable emotion prompts (CoOp-style) for emotion classification.
@@ -60,15 +73,30 @@ class CLIPCoOpEmotion(nn.Module):
         # CoOp PromptLearner needs: token_embedding, ln_final, visual, dtype
         class PseudoCLIPModel:
             def __init__(self, meru_clip):
+                self._meru_clip = meru_clip  # Store model reference
                 self.token_embedding = meru_clip.textual.token_embed
                 self.ln_final = meru_clip.textual.ln_final
                 self.visual = meru_clip.visual
                 self.dtype = torch.float32  # MERU uses float32 by default
                 self.positional_embedding = meru_clip.textual.posit_embed
-                self.transformer = meru_clip.textual.resblocks
-                self.text_projection = meru_clip.textual_proj.weight.T
+                self.transformer = TransformerWrapper(meru_clip.textual.resblocks)
+
+            @property
+            def text_projection(self):
+                # Return transposed projection - always gets current device
+                return self._meru_clip.textual_proj.weight.T
+
+        # Create wrapper for visual encoder to add input_resolution attribute
+        class VisualWrapper:
+            def __init__(self, visual):
+                self._visual = visual
+                self.input_resolution = 224  # MERU ViT-Base uses 224x224 images
+
+            def __getattr__(self, name):
+                return getattr(self._visual, name)
 
         pseudo_clip = PseudoCLIPModel(clip_model)
+        pseudo_clip.visual = VisualWrapper(pseudo_clip.visual)
 
         # Create config for PromptLearner
         cfg = SimpleNamespace(
@@ -102,6 +130,18 @@ class CLIPCoOpEmotion(nn.Module):
         # Only prompt_learner parameters are trainable
         self.dtype = torch.float32
 
+    def to(self, *args, **kwargs):
+        """Override to() to also move TextEncoder's text_projection tensor."""
+        # Move the model
+        self = super().to(*args, **kwargs)
+
+        # TextEncoder's text_projection is a plain tensor, not a parameter/buffer
+        # So we need to move it manually
+        if hasattr(self.text_encoder, 'text_projection') and isinstance(self.text_encoder.text_projection, torch.Tensor):
+            self.text_encoder.text_projection = self.text_encoder.text_projection.to(*args, **kwargs)
+
+        return self
+
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
         """Encode images to feature space."""
         image_feats = self.image_encoder(images.type(self.dtype))
@@ -126,7 +166,7 @@ class CLIPCoOpEmotion(nn.Module):
 
         # Get text features from learnable prompts
         prompts = self.prompt_learner()
-        tokenized_prompts = self.tokenized_prompts
+        tokenized_prompts = self.tokenized_prompts.to(prompts.device)
         text_features = self.text_encoder(prompts, tokenized_prompts)
 
         # Normalize features
@@ -177,15 +217,30 @@ class MERUCoOpEmotion(nn.Module):
         # Create pseudo CLIP model for CoOp components
         class PseudoCLIPModel:
             def __init__(self, meru):
+                self._meru = meru  # Store model reference
                 self.token_embedding = meru.textual.token_embed
                 self.ln_final = meru.textual.ln_final
                 self.visual = meru.visual
                 self.dtype = torch.float32
                 self.positional_embedding = meru.textual.posit_embed
-                self.transformer = meru.textual.resblocks
-                self.text_projection = meru.textual_proj.weight.T
+                self.transformer = TransformerWrapper(meru.textual.resblocks)
+
+            @property
+            def text_projection(self):
+                # Return transposed projection - always gets current device
+                return self._meru.textual_proj.weight.T
+
+        # Create wrapper for visual encoder to add input_resolution attribute
+        class VisualWrapper:
+            def __init__(self, visual):
+                self._visual = visual
+                self.input_resolution = 224  # MERU ViT-Base uses 224x224 images
+
+            def __getattr__(self, name):
+                return getattr(self._visual, name)
 
         pseudo_clip = PseudoCLIPModel(meru_model)
+        pseudo_clip.visual = VisualWrapper(pseudo_clip.visual)
 
         # Create config for PromptLearner
         cfg = SimpleNamespace(
@@ -219,6 +274,18 @@ class MERUCoOpEmotion(nn.Module):
         # (curv, visual_alpha, textual_alpha are already Parameters in meru_model)
 
         self.dtype = torch.float32
+
+    def to(self, *args, **kwargs):
+        """Override to() to also move TextEncoder's text_projection tensor."""
+        # Move the model
+        self = super().to(*args, **kwargs)
+
+        # TextEncoder's text_projection is a plain tensor, not a parameter/buffer
+        # So we need to move it manually
+        if hasattr(self.text_encoder, 'text_projection') and isinstance(self.text_encoder.text_projection, torch.Tensor):
+            self.text_encoder.text_projection = self.text_encoder.text_projection.to(*args, **kwargs)
+
+        return self
 
     def encode_image(self, images: torch.Tensor, project_to_hyperbolic: bool = True):
         """Encode images, optionally projecting to hyperbolic space."""
@@ -301,7 +368,7 @@ class MERUCoOpEmotion(nn.Module):
 
         # Get text features from learnable prompts on hyperboloid
         prompts = self.prompt_learner()
-        tokenized_prompts = self.tokenized_prompts
+        tokenized_prompts = self.tokenized_prompts.to(prompts.device)
         text_features = self.encode_text(
             prompts, tokenized_prompts, project_to_hyperbolic=True
         )

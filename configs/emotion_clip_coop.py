@@ -6,8 +6,6 @@ CLIP + CoOp for emotion classification on Emoset.
 Learns emotion-specific context prompts while freezing CLIP encoders.
 """
 
-from functools import partial
-
 import torch
 from torch.optim import SGD
 
@@ -67,8 +65,7 @@ optim = dict(
         momentum=0.9,
         weight_decay=5e-4,
     ),
-    lr_scheduler=L(partial)(
-        torch.optim.lr_scheduler.CosineAnnealingLR,
+    lr_scheduler=L(torch.optim.lr_scheduler.CosineAnnealingLR)(
         T_max="${...train.num_epochs}",
         eta_min=1e-6,
     ),

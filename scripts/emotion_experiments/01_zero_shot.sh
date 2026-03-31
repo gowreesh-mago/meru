@@ -2,7 +2,8 @@
 # Zero-shot emotion classification evaluation
 # Evaluates pretrained CLIP or MERU model with hand-crafted prompts
 
-set -e  # Exit on error
+set -e          # Exit on error
+set -o pipefail # Exit on error in any part of a pipeline
 
 # Setup Python path
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
@@ -24,6 +25,9 @@ echo "  Dataset: $DATASET_ROOT"
 echo "  Checkpoint: $CHECKPOINT"
 echo "  Output: $OUTPUT_DIR"
 echo "  Split: $SPLIT"
+if [ ! -z "$MAX_EVAL_SAMPLES" ]; then
+    echo "  Max samples: $MAX_EVAL_SAMPLES (QUICK TEST MODE)"
+fi
 echo ""
 
 # Check if checkpoint exists
@@ -40,17 +44,33 @@ fi
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
+# Detect model type from checkpoint name
+MODEL_TYPE="clip"
+if [[ "$CHECKPOINT" == *"meru"* ]]; then
+    MODEL_TYPE="meru"
+fi
+
+echo "Detected model type: $MODEL_TYPE"
+echo ""
+
 # Run evaluation
 echo "Running zero-shot evaluation..."
 echo ""
 
-python scripts/evaluate_emotion.py \
-    --config configs/emotion_zero_shot_clip.py \
-    --checkpoint "$CHECKPOINT" \
-    --data-root "$DATASET_ROOT" \
-    --split "$SPLIT" \
+EVAL_CMD="python scripts/zero_shot_emotion.py \
+    --checkpoint \"$CHECKPOINT\" \
+    --data-root \"$DATASET_ROOT\" \
+    --split \"$SPLIT\" \
+    --model-type \"$MODEL_TYPE\" \
     --batch-size 128 \
-    2>&1 | tee "$OUTPUT_DIR/eval_${SPLIT}_$(date +%Y%m%d_%H%M%S).log"
+    --output-dir \"$OUTPUT_DIR\""
+
+# Add --num-samples if MAX_EVAL_SAMPLES is set
+if [ ! -z "$MAX_EVAL_SAMPLES" ]; then
+    EVAL_CMD="$EVAL_CMD --num-samples $MAX_EVAL_SAMPLES"
+fi
+
+eval $EVAL_CMD 2>&1 | tee "$OUTPUT_DIR/eval_${SPLIT}_$(date +%Y%m%d_%H%M%S).log"
 
 echo ""
 echo "=========================================="

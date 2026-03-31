@@ -2,7 +2,8 @@
 # Setup script for emotion classification experiments
 # Run this first to verify dependencies and dataset
 
-set -e  # Exit on error
+set -e          # Exit on error
+set -o pipefail # Exit on error in any part of a pipeline
 
 # Setup Python path
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"

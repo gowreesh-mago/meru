@@ -11,7 +11,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Callable, Iterator
 
-import tensorflow_datasets as tfds
+try:
+    import tensorflow_datasets as tfds
+    HAS_TFDS = True
+except ImportError:
+    HAS_TFDS = False
+    tfds = None
+
 import torch
 from PIL import Image
 from torch.utils.data import Dataset, IterDataPipe
@@ -158,6 +164,12 @@ class TfdsWrapper(IterDataPipe):
         self.name = name
         self.split = split
         self.transform = transform
+
+        if not HAS_TFDS:
+            raise ImportError(
+                "tensorflow_datasets is required for TfDatasetWrapper. "
+                "Install it with: pip install tensorflow-datasets"
+            )
 
         dset = tfds.load(name, split=split, data_dir=root)
         dset = tfds.as_numpy(dset)

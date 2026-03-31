@@ -73,8 +73,11 @@ optim = dict(
         weight_decay=5e-4,
     ),
     lr_scheduler=L(LinearWarmupCosineDecayLR)(
-        total_steps="${...train.num_epochs * ...train.steps_per_epoch}",
-        warmup_steps="${...train.num_epochs * ...train.steps_per_epoch // 10}",  # 10% warmup
+        # Note: total_steps and warmup_steps will be computed by training script
+        # as: total_steps = num_epochs * steps_per_epoch
+        #     warmup_steps = total_steps // 10  (10% warmup)
+        total_steps=0,  # Placeholder, computed at runtime
+        warmup_steps=0,  # Placeholder, computed at runtime
     ),
 )
 

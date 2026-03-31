@@ -25,12 +25,13 @@ import torch
 from loguru import logger
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
 from torch.cuda import amp
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 # Register Emoset dataset
 import meru.emotion.dataset_integration  # noqa: F401
 from emoset.Emoset import EmoSet
-from meru.config import LazyConfig, LazyFactory
+from hydra.utils import instantiate
+from meru.config import LazyConfig
 from meru.emotion.emotion_coop_models import CLIPCoOpEmotion, MERUCoOpEmotion
 from meru.emotion.emotion_classes import EMOTION_CLASS_NAMES
 
@@ -45,6 +46,7 @@ parser.add_argument("--data-root", default="datasets/emoset", help="Path to Emos
 parser.add_argument("--split", default="test", choices=["train", "val", "test"], help="Which split to evaluate.")
 parser.add_argument("--batch-size", type=int, default=128, help="Batch size for evaluation.")
 parser.add_argument("--log-dir", default=None, help="Directory to save log files. If not specified, logs only to console.")
+parser.add_argument("--num-samples", type=int, default=None, help="Limit dataset to N samples (useful for quick testing).")
 # fmt: on
 
 
@@ -118,8 +120,16 @@ def evaluate_model(model, dataloader, device, use_amp=True):
 
 
 def main(_A: argparse.Namespace):
-    # Load config
-    _C = LazyConfig.load(_A.config)
+    # Load config - prefer the saved config from training if it exists
+    checkpoint_path = Path(_A.checkpoint)
+    saved_config = checkpoint_path.parent.parent / "config.yaml"
+
+    if saved_config.exists():
+        logger.info(f"Loading config from checkpoint directory: {saved_config}")
+        _C = LazyConfig.load(saved_config)
+    else:
+        logger.info(f"Loading config from argument: {_A.config}")
+        _C = LazyConfig.load(_A.config)
 
     # Setup logging to file if log_dir is specified
     if _A.log_dir is not None:
@@ -144,6 +154,12 @@ def main(_A: argparse.Namespace):
         phase=_A.split,
     )
 
+    # Limit dataset size if --num-samples is specified
+    if _A.num_samples is not None:
+        logger.info(f"Limiting dataset to {_A.num_samples} samples for quick testing")
+        indices = list(range(min(_A.num_samples, len(dataset))))
+        dataset = Subset(dataset, indices)
+
     dataloader = DataLoader(
         dataset,
         batch_size=_A.batch_size,
@@ -159,17 +175,9 @@ def main(_A: argparse.Namespace):
     # -------------------------------------------------------------------------
     logger.info("Building model...")
 
-    # Build base model
-    if hasattr(_C, "clip_base_model"):
-        base_model = LazyFactory(eval(_C.clip_base_model))
-    elif hasattr(_C, "meru_base_model"):
-        base_model = LazyFactory(eval(_C.meru_base_model))
-    else:
-        # For zero-shot, we might not have these - need to load directly
-        raise ValueError("Config must specify base model for evaluation")
-
-    # Build emotion model wrapper
-    model = LazyFactory(eval(_C.model))
+    # Build emotion model (which internally builds the base model)
+    # The config uses references like "${..clip_base_model}" so instantiate handles it
+    model = instantiate(_C.model)
     model = model.to(device)
 
     # Load checkpoint
@@ -177,11 +185,13 @@ def main(_A: argparse.Namespace):
     checkpoint = torch.load(_A.checkpoint, map_location=device)
 
     if "model" in checkpoint:
-        model.load_state_dict(checkpoint["model"])
+        model.load_state_dict(checkpoint["model"], strict=False)
         if "best_val_acc" in checkpoint:
             logger.info(f"Checkpoint best val acc: {checkpoint['best_val_acc']:.2f}%")
+        if "epoch" in checkpoint:
+            logger.info(f"Checkpoint epoch: {checkpoint['epoch']}")
     else:
-        model.load_state_dict(checkpoint)
+        model.load_state_dict(checkpoint, strict=False)
 
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
