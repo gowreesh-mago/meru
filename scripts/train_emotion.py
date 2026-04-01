@@ -18,11 +18,11 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from hydra.utils import instantiate
 from loguru import logger
 from omegaconf.errors import ConfigAttributeError
 from sklearn.metrics import accuracy_score, f1_score
-from torch.cuda import amp
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
@@ -32,6 +32,7 @@ from emoset.Emoset import EmoSet
 from meru.config import LazyConfig
 from meru.emotion.emotion_coop_models import CLIPCoOpEmotion, MERUCoOpEmotion
 from meru.utils.checkpointing import CheckpointManager
+from meru.utils.wandb_logger import WandbLogger
 
 # fmt: off
 parser = argparse.ArgumentParser(description=__doc__)
@@ -102,10 +103,6 @@ def main(_A: argparse.Namespace):
         _C.train["eval_period"] = int(os.environ["EVAL_PERIOD"])
         logger.info(f"Overriding eval_period from EVAL_PERIOD: {os.environ['EVAL_PERIOD']}")
 
-    if "CHECKPOINT_PERIOD" in os.environ:
-        _C.train["checkpoint_period"] = int(os.environ["CHECKPOINT_PERIOD"])
-        logger.info(f"Overriding checkpoint_period from CHECKPOINT_PERIOD: {os.environ['CHECKPOINT_PERIOD']}")
-
     if "NUM_WORKERS" in os.environ:
         _C.train["num_workers"] = int(os.environ["NUM_WORKERS"])
         logger.info(f"Overriding num_workers from NUM_WORKERS: {os.environ['NUM_WORKERS']}")
@@ -173,25 +170,62 @@ def main(_A: argparse.Namespace):
 
     logger.info(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
 
+    # Compute class weights for weighted cross-entropy (inverse-frequency weighting)
+    n_classes = _C.dataset["num_emotion_classes"]
+    class_counts = torch.zeros(n_classes, dtype=torch.float32)
+    for item in train_dataset:
+        class_counts[item["emotion_label_idx"]] += 1
+    class_weights = (class_counts.sum() / (n_classes * class_counts)).to(device)
+    logger.info(f"Class counts (train): {class_counts.long().tolist()}")
+    logger.info(f"Class weights: {[f'{w:.3f}' for w in class_weights.tolist()]}")
+
     # -------------------------------------------------------------------------
     #   BUILD MODEL
     # -------------------------------------------------------------------------
     logger.info("Building model...")
 
-    # Build emotion model (which internally builds the base model)
-    # The config uses references like "${..clip_base_model}" so instantiate handles it
-    model = instantiate(_C.model)
-    model = model.to(device)
-
-    # Load pretrained weights if specified
+    # Load pretrained weights into base model BEFORE wrapping with CoOp
     pretrained_path = _A.pretrained or _C.train.get("pretrained_checkpoint", "")
     if pretrained_path and Path(pretrained_path).exists():
-        logger.info(f"Loading pretrained weights from {pretrained_path}")
-        checkpoint = torch.load(pretrained_path, map_location=device)
-        if "model" in checkpoint:
-            model.load_state_dict(checkpoint["model"], strict=False)
+        logger.info(f"Loading pretrained weights into base model from {pretrained_path}")
+
+        # First, build and load the base model (keep on CPU for now)
+        if hasattr(_C, 'clip_base_model'):
+            logger.info("Building CLIPBaseline base model...")
+            base_model = instantiate(_C.clip_base_model)
+
+            # Load pretrained weights into base model (on CPU)
+            checkpoint = torch.load(pretrained_path, map_location='cpu')
+            if "model" in checkpoint:
+                base_model.load_state_dict(checkpoint["model"], strict=True)
+            else:
+                base_model.load_state_dict(checkpoint, strict=True)
+            logger.info(f"✓ Loaded pretrained CLIP weights successfully")
+
+            # Replace the LazyCall reference with the actual loaded model
+            _C.model.clip_model = base_model
+
+        elif hasattr(_C, 'meru_base_model'):
+            logger.info("Building MERU base model...")
+            base_model = instantiate(_C.meru_base_model)
+
+            # Load pretrained weights into base model (on CPU)
+            checkpoint = torch.load(pretrained_path, map_location='cpu')
+            if "model" in checkpoint:
+                base_model.load_state_dict(checkpoint["model"], strict=True)
+            else:
+                base_model.load_state_dict(checkpoint, strict=True)
+            logger.info(f"✓ Loaded pretrained MERU weights successfully")
+
+            # Replace the LazyCall reference with the actual loaded model
+            _C.model.meru_model = base_model
         else:
-            model.load_state_dict(checkpoint, strict=False)
+            logger.warning("No base model found in config, skipping pretrained weight loading")
+
+    # Build emotion model (wraps the base model with CoOp components)
+    logger.info("Building emotion classification model...")
+    model = instantiate(_C.model)
+    model = model.to(device)
 
     # Count trainable parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -259,7 +293,7 @@ def main(_A: argparse.Namespace):
     scheduler = instantiate(_C.optim["lr_scheduler"], optimizer=optimizer)
 
     # Setup AMP scaler
-    scaler = amp.GradScaler(enabled=_C.train.get("amp", True))
+    scaler = torch.amp.GradScaler("cuda", enabled=_C.train.get("amp", True))
 
     # Setup checkpoint manager
     checkpoint_manager = CheckpointManager(
@@ -280,23 +314,49 @@ def main(_A: argparse.Namespace):
     # Setup tensorboard
     writer = SummaryWriter(log_dir=output_dir / "tensorboard")
 
+    # Setup wandb (optional, controlled by environment variables)
+    wandb_config = {
+        "model_type": "CLIP+CoOp" if isinstance(model, CLIPCoOpEmotion) else "MERU+CoOp",
+        "num_epochs": _C.train["num_epochs"],
+        "batch_size": _C.dataset["batch_size"],
+        "learning_rate": _C.optim["optimizer"].lr,
+        "num_ctx": model.n_ctx if hasattr(model, 'n_ctx') else None,
+        "dataset": _C.dataset["name"],
+        "seed": seed,
+    }
+    wandb_logger = WandbLogger(config=wandb_config)
+
     # -------------------------------------------------------------------------
     #   TRAINING LOOP
     # -------------------------------------------------------------------------
     num_epochs = _C.train["num_epochs"]
     gradient_clip = _C.train.get("gradient_clip_max_norm", None)
     eval_period = _C.train.get("eval_period", 1)
-    checkpoint_period = _C.train.get("checkpoint_period", 5)
 
     logger.info(f"Starting training for {num_epochs} epochs...")
+    logger.info(f"Evaluation period: Every {eval_period} epoch(s)")
+    logger.info(f"Checkpoints: Saving best model and final model only")
+    logger.info("")
+
+    # Global step counter for wandb logging
+    global_step = 0
 
     for epoch in range(start_epoch, num_epochs):
+        epoch_start_time = time.time()
+
+        logger.info("=" * 80)
+        logger.info(f"EPOCH {epoch + 1}/{num_epochs}")
+        logger.info("=" * 80)
+
         # ----------------------------------------------------------------
         #   TRAINING
         # ----------------------------------------------------------------
+        logger.info(f"Training...")
         model.train()
         train_loss = 0.0
         train_preds, train_labels = [], []
+
+        scaler_skip_count = 0  # track how many steps AMP skips due to overflow
 
         for batch_idx, batch in enumerate(train_loader):
             images = batch["image"].to(device)
@@ -304,14 +364,16 @@ def main(_A: argparse.Namespace):
 
             optimizer.zero_grad()
 
-            with amp.autocast(enabled=_C.train.get("amp", True)):
+            with torch.amp.autocast("cuda", enabled=_C.train.get("amp", True)):
                 output = model(images, labels)
-                loss = output["loss"]
+                # Replace internal loss with class-weighted CE for both models
+                loss = F.cross_entropy(output["logits"], labels, weight=class_weights)
 
             scaler.scale(loss).backward()
 
+            # Always unscale before clipping so grad norms are in true scale
+            scaler.unscale_(optimizer)
             if gradient_clip is not None:
-                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
 
             # Clamp MERU hyperbolic parameters if needed
@@ -321,8 +383,12 @@ def main(_A: argparse.Namespace):
                     model.meru.visual_alpha.data.clamp_(max=0.0)
                     model.meru.textual_alpha.data.clamp_(max=0.0)
 
+            scale_before = scaler.get_scale()
             scaler.step(optimizer)
             scaler.update()
+            if scaler.get_scale() < scale_before:
+                scaler_skip_count += 1
+
             scheduler.step()
 
             # Track metrics
@@ -331,10 +397,32 @@ def main(_A: argparse.Namespace):
             train_preds.extend(preds)
             train_labels.extend(labels.cpu().numpy())
 
+            # Compute batch accuracy
+            batch_acc = accuracy_score(labels.cpu().numpy(), preds) * 100
+
+            # Log step-level metrics to wandb
+            step_metrics = {
+                "train/step_loss": loss.item(),
+                "train/step_accuracy": batch_acc,
+                "train/lr": scheduler.get_last_lr()[0],
+                "epoch": epoch,
+            }
+
+            # Add MERU-specific metrics if applicable
+            if isinstance(model, MERUCoOpEmotion) and "contrastive_loss" in output:
+                step_metrics["train/step_contrastive_loss"] = output["contrastive_loss"].item()
+                step_metrics["train/step_entailment_loss"] = output["entailment_loss"].item()
+                step_metrics["meru/curv"] = model.meru.curv.exp().item()
+                step_metrics["meru/visual_alpha"] = model.meru.visual_alpha.exp().item()
+                step_metrics["meru/textual_alpha"] = model.meru.textual_alpha.exp().item()
+
+            wandb_logger.log(step_metrics, step=global_step)
+            global_step += 1
+
             if batch_idx % 10 == 0:
                 logger.info(
                     f"Epoch [{epoch}/{num_epochs}] Batch [{batch_idx}/{len(train_loader)}] "
-                    f"Loss: {loss.item():.4f}"
+                    f"Loss: {loss.item():.4f}, Acc: {batch_acc:.2f}%"
                 )
 
         # Compute epoch metrics
@@ -342,8 +430,20 @@ def main(_A: argparse.Namespace):
         train_acc = accuracy_score(train_labels, train_preds) * 100
         train_f1 = f1_score(train_labels, train_preds, average="macro") * 100
 
+        # Gradient norm of trainable params (prompt ctx) at end of epoch
+        grad_norm = sum(
+            p.grad.norm().item() ** 2
+            for p in model.parameters()
+            if p.requires_grad and p.grad is not None
+        ) ** 0.5
+
         logger.info(
-            f"Epoch {epoch} Train - Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%, F1: {train_f1:.2f}%"
+            f"  Train → Loss: {train_loss:.4f}, Acc: {train_acc:.2f}%, F1: {train_f1:.2f}%"
+        )
+        logger.info(
+            f"  AMP  → Scaler scale: {scaler.get_scale():.0f}, "
+            f"Skipped steps: {scaler_skip_count}/{len(train_loader)}, "
+            f"Grad norm (ctx): {grad_norm:.4f}"
         )
 
         writer.add_scalar("train/loss", train_loss, epoch)
@@ -351,20 +451,29 @@ def main(_A: argparse.Namespace):
         writer.add_scalar("train/f1", train_f1, epoch)
         writer.add_scalar("lr", scheduler.get_last_lr()[0], epoch)
 
+        # Log epoch-level train summary to wandb
+        wandb_logger.log({
+            "train/epoch_loss": train_loss,
+            "train/epoch_accuracy": train_acc,
+            "train/epoch_f1": train_f1,
+            "epoch": epoch,
+        }, step=global_step)
+
         # ----------------------------------------------------------------
         #   VALIDATION
         # ----------------------------------------------------------------
         if (epoch + 1) % eval_period == 0:
+            logger.info(f"Validating...")
             model.eval()
             val_loss = 0.0
             val_preds, val_labels = [], []
 
             with torch.no_grad():
-                for batch in val_loader:
+                for batch_idx, batch in enumerate(val_loader):
                     images = batch["image"].to(device)
                     labels = batch["emotion_label_idx"].to(device)
 
-                    with amp.autocast(enabled=_C.train.get("amp", True)):
+                    with torch.amp.autocast("cuda", enabled=_C.train.get("amp", True)):
                         output = model(images, labels)
                         loss = output["loss"]
 
@@ -373,17 +482,68 @@ def main(_A: argparse.Namespace):
                     val_preds.extend(preds)
                     val_labels.extend(labels.cpu().numpy())
 
+                    # Compute batch accuracy
+                    batch_acc = accuracy_score(labels.cpu().numpy(), preds) * 100
+
+                    # Debug: Log logits statistics for first few batches
+                    if batch_idx < 3:
+                        logits = output["logits"]
+                        debug_msg = (
+                            f"  Val Batch {batch_idx}: Loss={loss.item():.6f}, "
+                            f"Acc={batch_acc:.2f}%, "
+                            f"Logits mean={logits.mean().item():.4f}, std={logits.std().item():.4f}, "
+                            f"Pred classes: {set(preds.tolist())}"
+                        )
+                        # Add CLIP-specific debug info
+                        if isinstance(model, CLIPCoOpEmotion) and "debug" in output:
+                            debug_info = output["debug"]
+                            debug_msg += (
+                                f", Text sim mean={debug_info['text_similarity_mean']:.4f}, "
+                                f"std={debug_info['text_similarity_std']:.4f}"
+                            )
+                        logger.info(debug_msg)
+
+                    # Log step-level validation metrics to wandb
+                    val_step_metrics = {
+                        "val/step_loss": loss.item(),
+                        "val/step_accuracy": batch_acc,
+                        "epoch": epoch,
+                    }
+
+                    # Add MERU-specific metrics if applicable
+                    if isinstance(model, MERUCoOpEmotion) and "contrastive_loss" in output:
+                        val_step_metrics["val/step_contrastive_loss"] = output["contrastive_loss"].item()
+                        val_step_metrics["val/step_entailment_loss"] = output["entailment_loss"].item()
+
+                    wandb_logger.log(val_step_metrics, step=global_step)
+                    global_step += 1
+
             val_loss /= len(val_loader)
             val_acc = accuracy_score(val_labels, val_preds) * 100
             val_f1 = f1_score(val_labels, val_preds, average="macro") * 100
 
             logger.info(
-                f"Epoch {epoch} Val - Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%, F1: {val_f1:.2f}%"
+                f"  Val   → Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%, F1: {val_f1:.2f}%"
             )
 
             writer.add_scalar("val/loss", val_loss, epoch)
             writer.add_scalar("val/accuracy", val_acc, epoch)
             writer.add_scalar("val/f1", val_f1, epoch)
+
+            # Log epoch-level validation summary to wandb
+            wandb_logger.log({
+                "val/epoch_loss": val_loss,
+                "val/epoch_accuracy": val_acc,
+                "val/epoch_f1": val_f1,
+                "epoch": epoch,
+            }, step=global_step)
+
+            # Epoch summary
+            epoch_time = time.time() - epoch_start_time
+            logger.info(
+                f"  Summary → Train Acc: {train_acc:.2f}% | Val Acc: {val_acc:.2f}% | "
+                f"Best Val: {max(best_val_acc, val_acc):.2f}% | Time: {epoch_time:.1f}s"
+            )
 
             # Save best model
             if val_acc > best_val_acc:
@@ -398,17 +558,33 @@ def main(_A: argparse.Namespace):
                     },
                     output_dir / "checkpoints" / "best_model.pth",
                 )
-                logger.info(f"Saved best model with val acc: {best_val_acc:.2f}%")
+                logger.info(f"  ✓ New best model! Val Acc: {best_val_acc:.2f}% (prev: {val_acc:.2f}%)")
+        else:
+            # Still log epoch time even if no validation
+            epoch_time = time.time() - epoch_start_time
+            logger.info(f"  Time: {epoch_time:.1f}s")
 
-        # ----------------------------------------------------------------
-        #   CHECKPOINT SAVING
-        # ----------------------------------------------------------------
-        if (epoch + 1) % checkpoint_period == 0:
-            checkpoint_manager.step(epoch)
+        logger.info("")  # Blank line between epochs
 
-    # Save final model
-    checkpoint_manager.final_step()
+    # Save final/last model
+    logger.info("Saving final model...")
+    torch.save(
+        {
+            "epoch": num_epochs - 1,
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
+            "best_val_acc": best_val_acc,
+        },
+        output_dir / "checkpoints" / "last_model.pth",
+    )
+    logger.info(f"✓ Final model saved to {output_dir / 'checkpoints' / 'last_model.pth'}")
+
+    # Log final results to wandb
+    wandb_logger.log({"best_val_accuracy": best_val_acc})
+
     writer.close()
+    wandb_logger.finish()
     logger.info(f"Training complete! Best val acc: {best_val_acc:.2f}%")
 
 

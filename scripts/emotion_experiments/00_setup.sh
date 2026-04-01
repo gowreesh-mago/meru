@@ -8,7 +8,7 @@ set -o pipefail # Exit on error in any part of a pipeline
 # Setup Python path
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
-export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
+export PYTHONPATH="$REPO_ROOT:$REPO_ROOT/emoset:${PYTHONPATH:-}"
 
 echo "=========================================="
 echo "Emotion Classification - Setup"
@@ -64,8 +64,6 @@ echo ""
 echo "Dataset statistics:"
 python -c "
 import json
-import sys
-sys.path.insert(0, 'emoset')
 dataset_dir = '$DATASET_DIR'
 
 for split in ['train', 'val', 'test']:
@@ -88,8 +86,9 @@ echo ""
 echo "Testing dataset loading..."
 python -c "
 import sys
-sys.path.insert(0, 'emoset')
-from Emoset import EmoSet
+import os
+# PYTHONPATH should already include repo root
+from emoset.Emoset import EmoSet
 
 dataset = EmoSet(
     data_root='$DATASET_DIR',

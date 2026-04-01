@@ -6,14 +6,14 @@ CLIP + CoOp for emotion classification on Emoset.
 Learns emotion-specific context prompts while freezing CLIP encoders.
 """
 
-import torch
-from torch.optim import SGD
+from torch.optim import AdamW
 
 from meru.config import LazyCall as L
 from meru.emotion.emotion_coop_models import CLIPCoOpEmotion
 from meru.encoders.image_encoders import build_timm_vit
 from meru.encoders.text_encoders import TransformerTextEncoder
 from meru.models import CLIPBaseline
+from meru.optim import LinearWarmupCosineDecayLR
 
 # Emotion class names
 EMOTION_NAMES = [
@@ -48,6 +48,7 @@ model = L(CLIPCoOpEmotion)(
     n_ctx=16,  # Number of learnable context tokens
     ctx_init="",  # Empty = random initialization
     class_token_position="end",
+    csc=True,  # Class-specific context - each emotion gets its own learnable context
 )
 
 # Dataset: Emoset (registered via meru.emotion.dataset_integration)
@@ -58,16 +59,19 @@ dataset = dict(
     batch_size=32,
 )
 
-# Optimizer: SGD for prompt learning (following CoOp paper)
+# Optimizer: AdamW (matching CLIP baseline)
 optim = dict(
-    optimizer=L(SGD)(
+    optimizer=L(AdamW)(
         lr=0.002,
-        momentum=0.9,
+        betas=(0.9, 0.98),
         weight_decay=5e-4,
     ),
-    lr_scheduler=L(torch.optim.lr_scheduler.CosineAnnealingLR)(
-        T_max="${...train.num_epochs}",
-        eta_min=1e-6,
+    lr_scheduler=L(LinearWarmupCosineDecayLR)(
+        # Note: total_steps and warmup_steps will be computed by training script
+        # as: total_steps = num_epochs * steps_per_epoch
+        #     warmup_steps = total_steps // 10  (10% warmup)
+        total_steps=0,  # Placeholder, computed at runtime
+        warmup_steps=0,  # Placeholder, computed at runtime
     ),
 )
 
@@ -77,6 +81,7 @@ train = dict(
     batch_size=32,
     num_workers=4,
     amp=True,  # Automatic mixed precision
+    gradient_clip_max_norm=1.0,  # Prevent AMP overflow → optimizer skip-steps
     seed=0,
     checkpoint_period=5,  # Save checkpoint every 5 epochs
     eval_period=1,  # Evaluate every epoch

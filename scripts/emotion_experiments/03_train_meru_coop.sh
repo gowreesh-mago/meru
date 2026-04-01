@@ -68,8 +68,8 @@ echo ""
 mkdir -p "$LOG_DIR"
 
 # Run training
-TRAIN_CMD="python scripts/train_emotion.py \
-    --config \"$CONFIG_FILE\" \
+TRAIN_CMD="python \"$REPO_ROOT/scripts/train_emotion.py\" \
+    --config \"$REPO_ROOT/$CONFIG_FILE\" \
     --output-dir \"$OUTPUT_DIR\" \
     --log-dir \"$LOG_DIR\" \
     --pretrained \"$PRETRAINED\""

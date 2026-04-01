@@ -30,6 +30,7 @@ from meru.encoders.image_encoders import build_timm_vit
 from meru.encoders.text_encoders import TransformerTextEncoder
 from meru.models import CLIPBaseline, MERU
 from meru.tokenizer import Tokenizer
+from meru.utils.wandb_logger import WandbLogger
 
 # Emotion class names
 EMOTION_NAMES = EMOTION_CLASS_NAMES
@@ -265,6 +266,16 @@ def main(args):
     total_params = sum(p.numel() for p in model.parameters())
     logger.info(f"Total params: {total_params:,}")
 
+    # Setup wandb (optional, controlled by environment variables)
+    wandb_config = {
+        "model_type": f"{args.model_type.upper()} Zero-Shot",
+        "checkpoint": str(args.checkpoint),
+        "split": args.split,
+        "batch_size": args.batch_size,
+        "num_prompts": len(EMOTION_PROMPTS),
+    }
+    wandb_logger = WandbLogger(config=wandb_config)
+
     # Evaluate
     logger.info(f"Running zero-shot evaluation on {args.split} split...")
     results = evaluate_zero_shot(model, dataloader, device, args.model_type)
@@ -317,6 +328,19 @@ def main(args):
         f.write(str(results["confusion_matrix"]))
 
     logger.info(f"Text results saved to: {text_results_file}")
+
+    # Log to wandb
+    wandb_metrics = {
+        "accuracy": results["accuracy"],
+        "macro_f1": results["macro_f1"],
+        "weighted_f1": results["weighted_f1"],
+    }
+    # Add per-class accuracies
+    for emotion, acc in results["per_class_accuracy"].items():
+        wandb_metrics[f"accuracy/{emotion}"] = acc
+
+    wandb_logger.log(wandb_metrics)
+    wandb_logger.finish()
 
 
 if __name__ == "__main__":

@@ -25,21 +25,86 @@ coop_path = Path(__file__).parent.parent.parent / "CoOp"
 if str(coop_path) not in sys.path:
     sys.path.insert(0, str(coop_path))
 
-from trainers.coop import PromptLearner, TextEncoder  # noqa: E402
+from trainers.coop import PromptLearner
+from trainers.coop import TextEncoder as _CoOpTextEncoder  # noqa: E402
+
+
+class TextEncoder(_CoOpTextEncoder):
+    """
+    Fixed TextEncoder that properly handles text_projection and device movement.
+
+    The original CoOp TextEncoder caches text_projection at init, which breaks
+    gradient flow when it's a transposed view that gets moved to different devices.
+
+    This version stores the underlying MERU CLIP model (nn.Module) so that device
+    movement works properly, and accesses text_projection dynamically.
+    """
+
+    def __init__(self, clip_model):
+        # Don't call super().__init__() to avoid caching text_projection
+        nn.Module.__init__(self)
+
+        # Store underlying MERU CLIP model (nn.Module) for proper device movement
+        # clip_model is PseudoCLIPModel (not nn.Module), so we extract the real model
+        # Handle both _meru_clip (CLIPCoOpEmotion) and _meru (MERUCoOpEmotion)
+        if hasattr(clip_model, '_meru_clip'):
+            self._underlying_model = clip_model._meru_clip
+        elif hasattr(clip_model, '_meru'):
+            self._underlying_model = clip_model._meru
+        else:
+            raise AttributeError("clip_model must have _meru_clip or _meru attribute")
+
+        # Store references to components (these are already nn.Module/Parameter/Tensor)
+        self.transformer = clip_model.transformer
+        self.positional_embedding = clip_model.positional_embedding
+        self.ln_final = clip_model.ln_final
+        self.dtype = clip_model.dtype
+        # DO NOT cache text_projection here!
+
+        # Store the causal attention mask from the text encoder so the transformer
+        # runs with the same mask used during MERU pre-training.
+        if hasattr(clip_model, '_meru_clip'):
+            self.register_buffer("attn_mask", clip_model._meru_clip.textual.attn_mask)
+        elif hasattr(clip_model, '_meru'):
+            self.register_buffer("attn_mask", clip_model._meru.textual.attn_mask)
+
+    def forward(self, prompts, tokenized_prompts):
+        # MERU's _TransformerBlock uses batch_first=True — inputs stay in NLD format.
+        # The original CoOp TextEncoder permuted to LND for OpenAI's sequence-first
+        # transformer, but that scrambles the sequence/class dims here and kills
+        # the gradient path from EOT output back to ctx positions.
+        x = prompts + self.positional_embedding.type(self.dtype)
+        seq_len = x.shape[1]
+        attn_mask = self.attn_mask[:seq_len, :seq_len]
+        x = self.transformer(x, attn_mask)
+        x = self.ln_final(x).type(self.dtype)
+
+        # x.shape = [batch_size, n_ctx, transformer.width]
+        # take features from the eot embedding (eot_token is the highest number in each sequence)
+        # Access text_projection dynamically from the underlying CLIP model
+        # This ensures it's always on the correct device after .to() calls
+        text_projection = self._underlying_model.textual_proj.weight.T
+        x = x[torch.arange(x.shape[0]), tokenized_prompts.argmax(dim=-1)] @ text_projection
+
+        return x
 
 from meru import lorentz as L  # noqa: E402
 
 
 class TransformerWrapper(nn.Module):
-    """Wrapper to make ModuleList of resblocks callable as a single transformer."""
+    """Wrapper to make ModuleList of resblocks callable as a single transformer.
+
+    IMPORTANT: MERU's _TransformerBlock uses batch_first=True, so inputs must
+    be in NLD format (batch, seq, dim). Do NOT permute to LND before calling.
+    """
 
     def __init__(self, resblocks):
         super().__init__()
         self.resblocks = resblocks
 
-    def forward(self, x):
+    def forward(self, x, attn_mask=None):
         for block in self.resblocks:
-            x = block(x)
+            x = block(x, attn_mask)
         return x
 
 
@@ -66,6 +131,7 @@ class CLIPCoOpEmotion(nn.Module):
         n_ctx: int = 16,
         ctx_init: str = "",
         class_token_position: str = "end",
+        csc: bool = False,
     ):
         super().__init__()
 
@@ -103,13 +169,24 @@ class CLIPCoOpEmotion(nn.Module):
             TRAINER=SimpleNamespace(
                 COOP=SimpleNamespace(
                     N_CTX=n_ctx,
-                    CSC=False,  # Not class-specific context
+                    CSC=csc,  # Class-specific context
                     CTX_INIT=ctx_init,
                     CLASS_TOKEN_POSITION=class_token_position,
                 )
             ),
             INPUT=SimpleNamespace(SIZE=[224, 224]),  # Image size
         )
+
+        # Freeze CLIP encoders BEFORE creating CoOp components
+        # This ensures only prompt tokens remain trainable
+        for param in clip_model.visual.parameters():
+            param.requires_grad = False
+        for param in clip_model.visual_proj.parameters():
+            param.requires_grad = False
+        for param in clip_model.textual.parameters():
+            param.requires_grad = False
+        for param in clip_model.textual_proj.parameters():
+            param.requires_grad = False
 
         # Initialize CoOp components
         self.prompt_learner = PromptLearner(cfg, emotion_names, pseudo_clip)
@@ -121,26 +198,11 @@ class CLIPCoOpEmotion(nn.Module):
         self.visual_proj = clip_model.visual_proj
         self.logit_scale = clip_model.logit_scale
 
-        # Freeze image encoder
-        for param in self.image_encoder.parameters():
-            param.requires_grad = False
-        for param in self.visual_proj.parameters():
-            param.requires_grad = False
-
         # Only prompt_learner parameters are trainable
         self.dtype = torch.float32
 
-    def to(self, *args, **kwargs):
-        """Override to() to also move TextEncoder's text_projection tensor."""
-        # Move the model
-        self = super().to(*args, **kwargs)
-
-        # TextEncoder's text_projection is a plain tensor, not a parameter/buffer
-        # So we need to move it manually
-        if hasattr(self.text_encoder, 'text_projection') and isinstance(self.text_encoder.text_projection, torch.Tensor):
-            self.text_encoder.text_projection = self.text_encoder.text_projection.to(*args, **kwargs)
-
-        return self
+        # Store reference to the CLIP model so we can access text_projection property
+        self._clip_model_ref = clip_model
 
     def encode_image(self, images: torch.Tensor) -> torch.Tensor:
         """Encode images to feature space."""
@@ -173,11 +235,21 @@ class CLIPCoOpEmotion(nn.Module):
         image_features = F.normalize(image_features, dim=-1)
         text_features = F.normalize(text_features, dim=-1)
 
+        # DEBUG: Check if text features are collapsing (all similar)
+        # Compute pairwise similarity between text features
+        text_similarity = text_features @ text_features.t()
+        # If all text features are very similar, similarities will be close to 1
+        # Store for debugging (off-diagonal values should be < 1)
+        output_debug = {
+            "text_similarity_mean": text_similarity.mean().item(),
+            "text_similarity_std": text_similarity.std().item(),
+        }
+
         # Compute similarity logits
         logit_scale = self.logit_scale.exp()
         logits = logit_scale * image_features @ text_features.t()
 
-        output = {"logits": logits}
+        output = {"logits": logits, "debug": output_debug}
 
         if labels is not None:
             loss = F.cross_entropy(logits, labels)
@@ -211,6 +283,7 @@ class MERUCoOpEmotion(nn.Module):
         ctx_init: str = "",
         class_token_position: str = "end",
         entail_weight: float = 0.2,
+        csc: bool = False,
     ):
         super().__init__()
 
@@ -247,13 +320,24 @@ class MERUCoOpEmotion(nn.Module):
             TRAINER=SimpleNamespace(
                 COOP=SimpleNamespace(
                     N_CTX=n_ctx,
-                    CSC=False,
+                    CSC=csc,
                     CTX_INIT=ctx_init,
                     CLASS_TOKEN_POSITION=class_token_position,
                 )
             ),
             INPUT=SimpleNamespace(SIZE=[224, 224]),
         )
+
+        # Freeze MERU encoders BEFORE creating CoOp components
+        # This ensures only prompt tokens and hyperbolic params remain trainable
+        for param in meru_model.visual.parameters():
+            param.requires_grad = False
+        for param in meru_model.visual_proj.parameters():
+            param.requires_grad = False
+        for param in meru_model.textual.parameters():
+            param.requires_grad = False
+        for param in meru_model.textual_proj.parameters():
+            param.requires_grad = False
 
         # Initialize CoOp components
         self.prompt_learner = PromptLearner(cfg, emotion_names, pseudo_clip)
@@ -264,28 +348,10 @@ class MERUCoOpEmotion(nn.Module):
         self.meru = meru_model
         self.entail_weight = entail_weight
 
-        # Freeze encoders
-        for param in self.meru.visual.parameters():
-            param.requires_grad = False
-        for param in self.meru.textual.parameters():
-            param.requires_grad = False
-
         # Keep MERU's hyperbolic parameters trainable
         # (curv, visual_alpha, textual_alpha are already Parameters in meru_model)
 
         self.dtype = torch.float32
-
-    def to(self, *args, **kwargs):
-        """Override to() to also move TextEncoder's text_projection tensor."""
-        # Move the model
-        self = super().to(*args, **kwargs)
-
-        # TextEncoder's text_projection is a plain tensor, not a parameter/buffer
-        # So we need to move it manually
-        if hasattr(self.text_encoder, 'text_projection') and isinstance(self.text_encoder.text_projection, torch.Tensor):
-            self.text_encoder.text_projection = self.text_encoder.text_projection.to(*args, **kwargs)
-
-        return self
 
     def encode_image(self, images: torch.Tensor, project_to_hyperbolic: bool = True):
         """Encode images, optionally projecting to hyperbolic space."""

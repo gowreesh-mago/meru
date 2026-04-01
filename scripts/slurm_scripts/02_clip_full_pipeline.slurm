@@ -1,0 +1,123 @@
+#!/bin/bash
+
+# General job information and output files
+#SBATCH --job-name=emoset_clip_full
+#SBATCH --output=/home/gmago/Emotions/outputs/slurm_out/emoset_clip_full_%j.txt
+#SBATCH --error=/home/gmago/Emotions/outputs/slurm_error/emoset_clip_full_%j.txt
+#SBATCH --partition=hava
+#SBATCH --account=havausers
+
+# Job resource information
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --time=5-00:00:00
+#SBATCH --mem=64G
+#SBATCH --nodes=1
+
+# GPU resource information
+#SBATCH --gpus=1
+#SBATCH --ntasks-per-gpu=1
+
+# Activate environment
+source "$PYTHON_ENV"
+
+# Set PYTHONPATH (add both meru and emoset directories)
+export PYTHONPATH="/home/gmago/Emotions/code/meru:/home/gmago/Emotions/code/meru/emoset:${PYTHONPATH:-}"
+
+# Configuration
+export EMOSET_ROOT="/ivi/zfs/s0/original_homes/gmago/emoset"
+export PRETRAINED_CLIP="/ivi/zfs/s0/original_homes/gmago/models/clip_vit_b.pth"
+
+# Weights & Biases configuration
+export WANDB_PROJECT="${WANDB_PROJECT:-emotion-classification}"
+export WANDB_ENTITY="${WANDB_ENTITY:-}"  # Set your wandb username/team
+export WANDB_NAME="clip_coop_${SLURM_JOB_ID}"
+export WANDB_DIR="/home/gmago/Emotions/outputs/wandb"
+export WANDB_MODE="${WANDB_MODE:-online}"  # Set to 'offline' to disable syncing
+mkdir -p "$WANDB_DIR"
+
+# Set output directory (can be overridden via --export when submitting)
+if [ -z "$EXPERIMENT_DIR" ]; then
+    EXPERIMENT_DIR="/home/gmago/Emotions/outputs/experiments/exp_$(date +%Y%m%d_%H%M%S)"
+fi
+
+# CLIP training parameters
+export OUTPUT_DIR="$EXPERIMENT_DIR/clip_coop"
+export NUM_EPOCHS="50"
+export BATCH_SIZE="32"
+export LEARNING_RATE="0.002"
+export NUM_CTX="16"
+export LOG_DIR="$OUTPUT_DIR/logs"
+
+mkdir -p "$OUTPUT_DIR"
+
+echo "=========================================="
+echo "CLIP+CoOp FULL PIPELINE"
+echo "=========================================="
+echo "Experiment directory: $EXPERIMENT_DIR"
+echo "Output directory: $OUTPUT_DIR"
+echo "Starting at: $(date)"
+echo ""
+
+# Export max samples if set (for sanity checks)
+if [ -n "$MAX_TRAIN_SAMPLES" ]; then
+    export MAX_TRAIN_SAMPLES
+    echo "Max train samples: $MAX_TRAIN_SAMPLES (sanity check mode)"
+    echo ""
+fi
+
+# ========================================
+# STAGE 1: Train CLIP+CoOp
+# ========================================
+echo "=========================================="
+echo "STAGE 1: Training CLIP+CoOp"
+echo "=========================================="
+echo ""
+
+bash /home/gmago/Emotions/code/meru/scripts/emotion_experiments/02_train_clip_coop.sh
+
+if [ $? -ne 0 ]; then
+    echo "❌ CLIP training failed"
+    exit 1
+fi
+
+echo ""
+echo "✓ CLIP training completed"
+echo ""
+
+# ========================================
+# STAGE 2: Evaluate CLIP+CoOp
+# ========================================
+echo "=========================================="
+echo "STAGE 2: Evaluating CLIP+CoOp"
+echo "=========================================="
+echo ""
+
+export CHECKPOINT="$OUTPUT_DIR/checkpoints/best_model.pth"
+export BATCH_SIZE="128"
+
+if [ ! -f "$CHECKPOINT" ]; then
+    echo "❌ Checkpoint not found at: $CHECKPOINT"
+    exit 1
+fi
+
+echo "Evaluating on validation set..."
+bash /home/gmago/Emotions/code/meru/scripts/emotion_experiments/04_evaluate.sh clip_coop val
+
+echo ""
+echo "Evaluating on test set..."
+bash /home/gmago/Emotions/code/meru/scripts/emotion_experiments/04_evaluate.sh clip_coop test
+
+echo ""
+echo "✓ CLIP evaluation completed"
+echo ""
+
+# ========================================
+# Summary
+# ========================================
+echo "=========================================="
+echo "CLIP+CoOp PIPELINE COMPLETE"
+echo "=========================================="
+echo "Checkpoint: $CHECKPOINT"
+echo "Completed at: $(date)"
+echo "=========================================="

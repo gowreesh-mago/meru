@@ -49,9 +49,10 @@ model = L(MERUCoOpEmotion)(
     meru_model="${..meru_base_model}",
     emotion_names=EMOTION_NAMES,
     n_ctx=16,  # Number of learnable context tokens
-    ctx_init="",  # Empty = random initialization
+    ctx_init="a photo of a",  # Initialize with meaningful text (better than random)
     class_token_position="end",
     entail_weight=0.2,  # Weight for Emotion → Image entailment loss
+    csc=True,  # Class-specific context - each emotion gets its own learnable context
 )
 
 # Dataset: Emoset

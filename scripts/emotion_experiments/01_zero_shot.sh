@@ -57,7 +57,7 @@ echo ""
 echo "Running zero-shot evaluation..."
 echo ""
 
-EVAL_CMD="python scripts/zero_shot_emotion.py \
+EVAL_CMD="python \"$REPO_ROOT/scripts/zero_shot_emotion.py\" \
     --checkpoint \"$CHECKPOINT\" \
     --data-root \"$DATASET_ROOT\" \
     --split \"$SPLIT\" \

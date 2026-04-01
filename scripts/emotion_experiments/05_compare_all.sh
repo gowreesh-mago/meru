@@ -63,7 +63,7 @@ echo ""
 
 if [ -f "$PRETRAINED_CLIP" ]; then
     export PRETRAINED_CHECKPOINT="$PRETRAINED_CLIP"
-    bash scripts/emotion_experiments/01_zero_shot.sh
+    bash "$REPO_ROOT/scripts/emotion_experiments/01_zero_shot.sh"
 
     # Copy results
     cp output/zero_shot/eval_results_${SPLIT}.txt "$COMPARISON_DIR/zero_shot_results.txt" 2>/dev/null || true
@@ -85,7 +85,7 @@ echo ""
 CLIP_COOP_CHECKPOINT="${CLIP_COOP_CHECKPOINT:-output/clip_coop/checkpoints/best_model.pth}"
 if [ -f "$CLIP_COOP_CHECKPOINT" ]; then
     export CHECKPOINT="$CLIP_COOP_CHECKPOINT"
-    bash scripts/emotion_experiments/04_evaluate.sh clip_coop "$SPLIT"
+    bash "$REPO_ROOT/scripts/emotion_experiments/04_evaluate.sh" clip_coop "$SPLIT"
 
     # Copy results from the checkpoint's directory
     CHECKPOINT_DIR="$(dirname "$CLIP_COOP_CHECKPOINT")"
@@ -111,7 +111,7 @@ echo ""
 MERU_COOP_CHECKPOINT="${MERU_COOP_CHECKPOINT:-output/meru_coop/checkpoints/best_model.pth}"
 if [ -f "$MERU_COOP_CHECKPOINT" ]; then
     export CHECKPOINT="$MERU_COOP_CHECKPOINT"
-    bash scripts/emotion_experiments/04_evaluate.sh meru_coop "$SPLIT"
+    bash "$REPO_ROOT/scripts/emotion_experiments/04_evaluate.sh" meru_coop "$SPLIT"
 
     # Copy results from the checkpoint's directory
     CHECKPOINT_DIR="$(dirname "$MERU_COOP_CHECKPOINT")"

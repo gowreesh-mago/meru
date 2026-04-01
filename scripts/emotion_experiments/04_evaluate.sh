@@ -25,13 +25,13 @@ BATCH_SIZE="${BATCH_SIZE:-128}"
 # Set paths based on model type
 case "$MODEL_TYPE" in
     clip_coop)
-        CONFIG_FILE="configs/emotion_clip_coop.py"
+        CONFIG_FILE="$REPO_ROOT/configs/emotion_clip_coop.py"
         OUTPUT_DIR="output/clip_coop"
         LOG_DIR="${LOG_DIR:-$OUTPUT_DIR/logs}"
         MODEL_NAME="CLIP+CoOp"
         ;;
     meru_coop)
-        CONFIG_FILE="configs/emotion_meru_coop.py"
+        CONFIG_FILE="$REPO_ROOT/configs/emotion_meru_coop.py"
         OUTPUT_DIR="output/meru_coop"
         LOG_DIR="${LOG_DIR:-$OUTPUT_DIR/logs}"
         MODEL_NAME="MERU+CoOp"
@@ -76,7 +76,7 @@ mkdir -p "$LOG_DIR"
 echo "Running evaluation on $SPLIT split..."
 echo ""
 
-EVAL_CMD="python scripts/evaluate_emotion.py \
+EVAL_CMD="python \"$REPO_ROOT/scripts/evaluate_emotion.py\" \
     --config \"$CONFIG_FILE\" \
     --checkpoint \"$CHECKPOINT\" \
     --data-root \"$DATASET_ROOT\" \
