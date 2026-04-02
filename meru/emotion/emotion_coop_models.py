@@ -12,6 +12,7 @@ This module provides thin wrappers that integrate:
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -441,6 +442,14 @@ class MERUCoOpEmotion(nn.Module):
             - contrastive_loss: Cross-entropy classification loss
             - entailment_loss: Emotion → Image entailment loss
         """
+        # Clamp hyperbolic params to valid ranges at the top of every forward pass
+        # (training AND validation). Mirrors vanilla MERU (models.py:283-289).
+        # Must happen here — not just after optimizer step — so that the current
+        # forward uses numerically valid parameters, and validation is also covered.
+        self.meru.curv.data.clamp_(**self.meru._curv_minmax)
+        self.meru.visual_alpha.data.clamp_(max=0.0)
+        self.meru.textual_alpha.data.clamp_(max=0.0)
+
         # Get image features on hyperboloid
         image_features = self.encode_image(images, project_to_hyperbolic=True)
 
@@ -451,10 +460,13 @@ class MERUCoOpEmotion(nn.Module):
             prompts, tokenized_prompts, project_to_hyperbolic=True
         )
 
-        # Compute similarity using Lorentzian distance
+        # Compute similarity using Lorentzian distance, scaled by logit_scale
+        # temperature — same as vanilla MERU (models.py:321-325). logit_scale is
+        # frozen here but still provides the pretrained temperature calibration.
         curv = self.meru.curv.exp()
         distances = L.pairwise_dist(image_features, text_features, curv)
-        logits = -distances  # Negative distance (closer = higher logit)
+        logit_scale = self.meru.logit_scale.exp()
+        logits = -distances * logit_scale
 
         output = {"logits": logits}
 

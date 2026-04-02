@@ -10,7 +10,6 @@ Usage:
 """
 
 import argparse
-import math
 import random
 import time
 import warnings
@@ -392,8 +391,9 @@ def main(_A: argparse.Namespace):
 
             with torch.cuda.amp.autocast(enabled=_C.train.get("amp", True)):
                 output = model(images, labels)
-                # Replace internal loss with class-weighted CE for both models
-                loss = F.cross_entropy(output["logits"], labels)
+                # Use the model's computed loss: for MERU this includes the
+                # entailment term; for CLIP it is plain cross-entropy.
+                loss = output["loss"]
 
             scaler.scale(loss).backward()
 
@@ -410,12 +410,9 @@ def main(_A: argparse.Namespace):
                 ]
                 torch.nn.utils.clip_grad_norm_(params_to_clip, gradient_clip)
 
-            # Clamp MERU hyperbolic parameters if needed
-            if isinstance(model, MERUCoOpEmotion):
-                with torch.no_grad():
-                    model.meru.curv.data.clamp_(min=math.log(0.1), max=math.log(10.0))
-                    model.meru.visual_alpha.data.clamp_(max=0.0)
-                    model.meru.textual_alpha.data.clamp_(max=0.0)
+            # Hyperbolic parameter clamping is handled inside MERUCoOpEmotion.forward()
+            # at the top of every forward pass (training and validation), matching
+            # vanilla MERU's behavior. No post-step clamping needed here.
 
             scale_before = scaler.get_scale()
             scaler.step(optimizer)
