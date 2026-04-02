@@ -13,6 +13,7 @@ import argparse
 import math
 import random
 import time
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -34,6 +35,9 @@ from meru.emotion.emotion_coop_models import CLIPCoOpEmotion, MERUCoOpEmotion
 from meru.utils.checkpointing import CheckpointManager
 from meru.utils.wandb_logger import WandbLogger
 
+warnings.filterwarnings("ignore", message="torch.meshgrid: in an upcoming release")
+warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*", category=FutureWarning)
+
 # fmt: off
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("--config", required=True, help="Path to config .py file.")
@@ -43,6 +47,25 @@ parser.add_argument("--resume", action="store_true", help="Resume training from 
 parser.add_argument("--pretrained", default="", help="Path to pretrained model checkpoint.")
 parser.add_argument("--num-samples", type=int, default=None, help="Limit dataset to N samples (useful for quick testing).")
 # fmt: on
+
+
+class CachedDataset(torch.utils.data.Dataset):
+    """Lazily caches dataset items in worker memory after first access.
+
+    With persistent_workers=True, each worker's cache survives across epochs.
+    Safe only for datasets with deterministic transforms (val/test).
+    """
+    def __init__(self, dataset):
+        self._dataset = dataset
+        self._cache = {}
+
+    def __len__(self):
+        return len(self._dataset)
+
+    def __getitem__(self, idx):
+        if idx not in self._cache:
+            self._cache[idx] = self._dataset[idx]
+        return self._cache[idx]
 
 
 def main(_A: argparse.Namespace):
@@ -152,32 +175,35 @@ def main(_A: argparse.Namespace):
 
     batch_size = _C.dataset["batch_size"]
     num_workers = _C.train.get("num_workers", 4)
+    persistent = num_workers > 0
+    prefetch = 4 if num_workers > 0 else None
 
+    # Train: no item-level cache — random crop/flip must vary each epoch.
+    # persistent_workers keeps worker processes (and their OS page cache) alive
+    # between epochs, avoiding per-epoch worker restart overhead.
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
+    # Val: deterministic transforms — wrap in CachedDataset so each worker
+    # caches its assigned items after the first epoch and serves from memory
+    # for all subsequent epochs.
     val_loader = DataLoader(
-        val_dataset,
+        CachedDataset(val_dataset),
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=persistent,
+        prefetch_factor=prefetch,
     )
 
     logger.info(f"Train: {len(train_dataset)} samples, Val: {len(val_dataset)} samples")
-
-    # Compute class weights for weighted cross-entropy (inverse-frequency weighting)
-    n_classes = _C.dataset["num_emotion_classes"]
-    class_counts = torch.zeros(n_classes, dtype=torch.float32)
-    for item in train_dataset:
-        class_counts[item["emotion_label_idx"]] += 1
-    class_weights = (class_counts.sum() / (n_classes * class_counts)).to(device)
-    logger.info(f"Class counts (train): {class_counts.long().tolist()}")
-    logger.info(f"Class weights: {[f'{w:.3f}' for w in class_weights.tolist()]}")
 
     # -------------------------------------------------------------------------
     #   BUILD MODEL
@@ -293,7 +319,7 @@ def main(_A: argparse.Namespace):
     scheduler = instantiate(_C.optim["lr_scheduler"], optimizer=optimizer)
 
     # Setup AMP scaler
-    scaler = torch.amp.GradScaler("cuda", enabled=_C.train.get("amp", True))
+    scaler = torch.cuda.amp.GradScaler(enabled=_C.train.get("amp", True))
 
     # Setup checkpoint manager
     checkpoint_manager = CheckpointManager(
@@ -364,17 +390,25 @@ def main(_A: argparse.Namespace):
 
             optimizer.zero_grad()
 
-            with torch.amp.autocast("cuda", enabled=_C.train.get("amp", True)):
+            with torch.cuda.amp.autocast(enabled=_C.train.get("amp", True)):
                 output = model(images, labels)
                 # Replace internal loss with class-weighted CE for both models
-                loss = F.cross_entropy(output["logits"], labels, weight=class_weights)
+                loss = F.cross_entropy(output["logits"], labels)
 
             scaler.scale(loss).backward()
 
             # Always unscale before clipping so grad norms are in true scale
             scaler.unscale_(optimizer)
             if gradient_clip is not None:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), gradient_clip)
+                # Clip only the parameters in the optimizer (prompt_learner).
+                # Using model.parameters() includes frozen/unoptimised params
+                # (e.g. logit_scale) whose gradients are still at AMP scale,
+                # which makes the total norm ≈ scale_factor and drives
+                # clip_coeff ≈ 0, zeroing ctx.grad on every step.
+                params_to_clip = [
+                    p for group in optimizer.param_groups for p in group["params"]
+                ]
+                torch.nn.utils.clip_grad_norm_(params_to_clip, gradient_clip)
 
             # Clamp MERU hyperbolic parameters if needed
             if isinstance(model, MERUCoOpEmotion):
@@ -473,7 +507,7 @@ def main(_A: argparse.Namespace):
                     images = batch["image"].to(device)
                     labels = batch["emotion_label_idx"].to(device)
 
-                    with torch.amp.autocast("cuda", enabled=_C.train.get("amp", True)):
+                    with torch.cuda.amp.autocast(enabled=_C.train.get("amp", True)):
                         output = model(images, labels)
                         loss = output["loss"]
 

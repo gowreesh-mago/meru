@@ -45,3 +45,5 @@ output/
 
 # vim stuff
 *.swp
+
+/scripts/slurm_scripts/config.sh

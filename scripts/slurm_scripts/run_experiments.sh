@@ -23,20 +23,32 @@
 set -e  # Exit on error
 
 # ============================================================================
+# LOAD SHARED CONFIG (API keys, secrets)
+# ============================================================================
+
+SCRIPT_DIR_EARLY="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+CONFIG_FILE="$SCRIPT_DIR_EARLY/config.sh"
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+else
+    echo "⚠️  config.sh not found at $CONFIG_FILE — WANDB_API_KEY may not be set."
+fi
+
+# ============================================================================
 # CONFIGURATION - EDIT THESE PATHS FOR YOUR SETUP
 # ============================================================================
 
 # Paths
-EMOSET_ROOT="/ivi/zfs/s0/original_homes/gmago/emoset"
+EMOSET_ROOT="/ivi/xfs/gmago/emoset"
 PRETRAINED_CLIP="/ivi/zfs/s0/original_homes/gmago/models/clip_vit_b.pth"
 PRETRAINED_MERU="/ivi/zfs/s0/original_homes/gmago/models/meru_vit_b.pth"
 OUTPUT_BASE="/home/gmago/Emotions/outputs"
-SLURM_OUT_DIR="/home/gmago/AA/outputs/slurm_out"
-SLURM_ERROR_DIR="/home/gmago/AA/outputs/slurm_error"
-WANDB_DIR="/home/gmago/AA/outputs/wandb"
+SLURM_OUT_DIR="/home/gmago/Emotions/outputs/slurm_out"
+SLURM_ERROR_DIR="/home/gmago/Emotions/outputs/slurm_error"
+WANDB_DIR="/home/gmago/Emotions/outputs/wandb"
 
 # SLURM configuration
-PARTITION="hava"
+PARTITION="all"
 ACCOUNT="havausers"
 
 # Python environment configuration (based on partition)
@@ -56,7 +68,7 @@ fi
 #   export WANDB_ENTITY="my-team"
 #   export WANDB_MODE="offline"  # or "disabled" to turn off wandb
 #   bash run_experiments.sh sanity
-WANDB_API_KEY="${WANDB_API_KEY:-}"  # Set your wandb API key (get from: wandb login)
+WANDB_API_KEY="${WANDB_API_KEY:-}"  # Set via config.sh or: export WANDB_API_KEY=your_key
 WANDB_PROJECT="${WANDB_PROJECT:-emotion-classification}"
 WANDB_ENTITY="${WANDB_ENTITY:-}"  # Set your wandb username/team
 WANDB_MODE="${WANDB_MODE:-online}"  # online, offline, or disabled
@@ -96,7 +108,8 @@ echo ""
 if [ "$MODE" = "sanity" ]; then
     echo "🔍 SANITY CHECK MODE"
     echo "   - Limited samples for quick testing"
-    echo "   - Zero-shot: 500 samples (~2 min)"
+    echo "   - Zero-shot CLIP: 500 samples (~2 min)"
+    echo "   - Zero-shot MERU: 500 samples (~2 min)"
     echo "   - CLIP: 1000 train samples, 5 epochs (~10 min)"
     echo "   - MERU: 1000 train samples, 10 epochs (~20 min)"
     echo "   - Total time: ~30 minutes"
@@ -111,7 +124,8 @@ if [ "$MODE" = "sanity" ]; then
 elif [ "$MODE" = "full" ]; then
     echo "🚀 FULL EXPERIMENT MODE"
     echo "   - All samples, full training"
-    echo "   - Zero-shot: Full test set (~2 hours)"
+    echo "   - Zero-shot CLIP: Full test set (~2 hours)"
+    echo "   - Zero-shot MERU: Full test set (~2 hours)"
     echo "   - CLIP: $CLIP_EPOCHS epochs (~1 day)"
     echo "   - MERU: $MERU_EPOCHS epochs (~1.5 days)"
     echo "   - Total time: ~1.5 days"
@@ -176,10 +190,11 @@ mkdir -p "$SLURM_ERROR_DIR"
 mkdir -p "$WANDB_DIR"
 
 # Create experiment directory
+DATETIME=$(date +%Y%m%d_%H%M%S)
 if [ -n "$RUN_NAME" ]; then
-    EXPERIMENT_ID="${MODE}_${RUN_NAME}_$(date +%Y%m%d_%H%M%S)"
+    EXPERIMENT_ID="${MODE}_${RUN_NAME}_${DATETIME}"
 else
-    EXPERIMENT_ID="${MODE}_$(date +%Y%m%d_%H%M%S)"
+    EXPERIMENT_ID="${MODE}_${DATETIME}"
 fi
 
 EXPERIMENT_DIR="$OUTPUT_BASE/experiments/$EXPERIMENT_ID"
@@ -233,48 +248,81 @@ echo ""
 # ============================================================================
 # STAGE 1: Setup
 # ============================================================================
-echo "[1/5] Submitting Setup..."
+# echo "[1/6] Submitting Setup..."
 
-SETUP_JOB=$(sbatch --parsable \
-    --partition="$PARTITION" \
-    --account="$ACCOUNT" \
-    --export=ALL,EMOSET_ROOT="$EMOSET_ROOT",PYTHON_ENV="$PYTHON_ENV" \
-    "$SCRIPT_DIR/00_setup.slurm")
+# SETUP_JOB=$(sbatch --parsable \
+#     --partition="$PARTITION" \
+#     --account="$ACCOUNT" \
+#     --output="$SLURM_OUT_DIR/emoset_setup_${EXPERIMENT_ID}_%j.txt" \
+#     --error="$SLURM_ERROR_DIR/emoset_setup_${EXPERIMENT_ID}_%j.txt" \
+#     --export=ALL,EMOSET_ROOT="$EMOSET_ROOT",PYTHON_ENV="$PYTHON_ENV" \
+#     "$SCRIPT_DIR/00_setup.slurm")
 
-echo "      Job ID: $SETUP_JOB"
-echo ""
-
-# ============================================================================
-# STAGE 2: Zero-shot Evaluation (runs in parallel with training)
-# ============================================================================
-echo "[2/5] Submitting Zero-shot evaluation..."
-
-ZEROSHOT_JOB=$(sbatch --parsable \
-    --partition="$PARTITION" \
-    --account="$ACCOUNT" \
-    --dependency=afterok:$SETUP_JOB \
-    --export=ALL,\
-PYTHON_ENV="$PYTHON_ENV",\
-EMOSET_ROOT="$EMOSET_ROOT",\
-PRETRAINED_CLIP="$PRETRAINED_CLIP",\
-PRETRAINED_CHECKPOINT="$PRETRAINED_CLIP",\
-MAX_EVAL_SAMPLES="$MAX_EVAL_SAMPLES",\
-WANDB_API_KEY="$WANDB_API_KEY",\
-WANDB_PROJECT="$WANDB_PROJECT",\
-WANDB_ENTITY="$WANDB_ENTITY",\
-WANDB_NAME="zero_shot_${MODE}${RUN_NAME:+_$RUN_NAME}",\
-WANDB_DIR="$WANDB_DIR",\
-WANDB_MODE="$WANDB_MODE" \
-    "$SCRIPT_DIR/01_zero_shot_full.slurm")
-
-echo "      Job ID: $ZEROSHOT_JOB"
-echo "      → Runs in PARALLEL with CLIP and MERU"
-echo ""
+# echo "      Job ID: $SETUP_JOB"
+# echo ""
 
 # ============================================================================
-# STAGE 3: CLIP Training (runs in parallel)
+# STAGE 2: Zero-shot CLIP Evaluation (runs in parallel with training)
 # ============================================================================
-echo "[3/5] Submitting CLIP+CoOp training & evaluation..."
+# echo "[2/6] Submitting Zero-shot CLIP evaluation..."
+
+# ZEROSHOT_CLIP_JOB=$(sbatch --parsable \
+#     --partition="$PARTITION" \
+#     --account="$ACCOUNT" \
+#     --dependency=afterok:$SETUP_JOB \
+#     --output="$SLURM_OUT_DIR/emoset_zero_shot_clip_${EXPERIMENT_ID}_%j.txt" \
+#     --error="$SLURM_ERROR_DIR/emoset_zero_shot_clip_${EXPERIMENT_ID}_%j.txt" \
+#     --export=ALL,\
+# PYTHON_ENV="$PYTHON_ENV",\
+# EMOSET_ROOT="$EMOSET_ROOT",\
+# PRETRAINED_CLIP="$PRETRAINED_CLIP",\
+# PRETRAINED_CHECKPOINT="$PRETRAINED_CLIP",\
+# MAX_EVAL_SAMPLES="$MAX_EVAL_SAMPLES",\
+# WANDB_API_KEY="$WANDB_API_KEY",\
+# WANDB_PROJECT="$WANDB_PROJECT",\
+# WANDB_ENTITY="$WANDB_ENTITY",\
+# WANDB_NAME="zero_shot_clip_${MODE}_${DATETIME}",\
+# WANDB_DIR="$WANDB_DIR",\
+# WANDB_MODE="$WANDB_MODE" \
+#     "$SCRIPT_DIR/01_zero_shot_full.slurm")
+
+# echo "      Job ID: $ZEROSHOT_CLIP_JOB"
+# echo "      → Runs in PARALLEL with Zero-shot MERU, CLIP and MERU"
+# echo ""
+
+# ============================================================================
+# STAGE 3: Zero-shot MERU Evaluation (runs in parallel with training)
+# ============================================================================
+# echo "[3/6] Submitting Zero-shot MERU evaluation..."
+
+# ZEROSHOT_MERU_JOB=$(sbatch --parsable \
+#     --partition="$PARTITION" \
+#     --account="$ACCOUNT" \
+#     --dependency=afterok:$SETUP_JOB \
+#     --output="$SLURM_OUT_DIR/emoset_zero_shot_meru_${EXPERIMENT_ID}_%j.txt" \
+#     --error="$SLURM_ERROR_DIR/emoset_zero_shot_meru_${EXPERIMENT_ID}_%j.txt" \
+#     --export=ALL,\
+# PYTHON_ENV="$PYTHON_ENV",\
+# EMOSET_ROOT="$EMOSET_ROOT",\
+# PRETRAINED_MERU="$PRETRAINED_MERU",\
+# PRETRAINED_CHECKPOINT="$PRETRAINED_MERU",\
+# MAX_EVAL_SAMPLES="$MAX_EVAL_SAMPLES",\
+# WANDB_API_KEY="$WANDB_API_KEY",\
+# WANDB_PROJECT="$WANDB_PROJECT",\
+# WANDB_ENTITY="$WANDB_ENTITY",\
+# WANDB_NAME="zero_shot_meru_${MODE}_${DATETIME}",\
+# WANDB_DIR="$WANDB_DIR",\
+# WANDB_MODE="$WANDB_MODE" \
+#     "$SCRIPT_DIR/05_zero_shot_meru_full.slurm")
+
+# echo "      Job ID: $ZEROSHOT_MERU_JOB"
+# echo "      → Runs in PARALLEL with Zero-shot CLIP, CLIP and MERU"
+# echo ""
+
+# ============================================================================
+# STAGE 4: CLIP Training (runs in parallel)
+# ============================================================================
+echo "[4/6] Submitting CLIP+CoOp training & evaluation..."
 
 CLIP_OUTPUT_DIR="$EXPERIMENT_DIR/clip_coop"
 mkdir -p "$CLIP_OUTPUT_DIR"
@@ -282,7 +330,8 @@ mkdir -p "$CLIP_OUTPUT_DIR"
 CLIP_JOB=$(sbatch --parsable \
     --partition="$PARTITION" \
     --account="$ACCOUNT" \
-    --dependency=afterok:$SETUP_JOB \
+    --output="$SLURM_OUT_DIR/emoset_clip_coop_${EXPERIMENT_ID}_%j.txt" \
+    --error="$SLURM_ERROR_DIR/emoset_clip_coop_${EXPERIMENT_ID}_%j.txt" \
     --export=ALL,\
 PYTHON_ENV="$PYTHON_ENV",\
 EMOSET_ROOT="$EMOSET_ROOT",\
@@ -297,19 +346,19 @@ MAX_TRAIN_SAMPLES="$MAX_TRAIN_SAMPLES",\
 WANDB_API_KEY="$WANDB_API_KEY",\
 WANDB_PROJECT="$WANDB_PROJECT",\
 WANDB_ENTITY="$WANDB_ENTITY",\
-WANDB_NAME="clip_coop_${MODE}${RUN_NAME:+_$RUN_NAME}",\
+WANDB_NAME="clip_coop_${MODE}_${DATETIME}",\
 WANDB_DIR="$WANDB_DIR",\
 WANDB_MODE="$WANDB_MODE" \
     "$SCRIPT_DIR/02_clip_full_pipeline.slurm")
 
 echo "      Job ID: $CLIP_JOB"
-echo "      → Runs in PARALLEL with Zero-shot and MERU"
+echo "      → Runs in PARALLEL with Zero-shot CLIP, Zero-shot MERU, and MERU"
 echo ""
 
 # ============================================================================
-# STAGE 4: MERU Training (runs in parallel)
+# STAGE 5: MERU Training (runs in parallel)
 # ============================================================================
-echo "[4/5] Submitting MERU+CoOp training & evaluation..."
+echo "[5/6] Submitting MERU+CoOp training & evaluation..."
 
 MERU_OUTPUT_DIR="$EXPERIMENT_DIR/meru_coop"
 mkdir -p "$MERU_OUTPUT_DIR"
@@ -317,7 +366,8 @@ mkdir -p "$MERU_OUTPUT_DIR"
 MERU_JOB=$(sbatch --parsable \
     --partition="$PARTITION" \
     --account="$ACCOUNT" \
-    --dependency=afterok:$SETUP_JOB \
+    --output="$SLURM_OUT_DIR/emoset_meru_coop_${EXPERIMENT_ID}_%j.txt" \
+    --error="$SLURM_ERROR_DIR/emoset_meru_coop_${EXPERIMENT_ID}_%j.txt" \
     --export=ALL,\
 PYTHON_ENV="$PYTHON_ENV",\
 EMOSET_ROOT="$EMOSET_ROOT",\
@@ -333,40 +383,42 @@ MAX_TRAIN_SAMPLES="$MAX_TRAIN_SAMPLES",\
 WANDB_API_KEY="$WANDB_API_KEY",\
 WANDB_PROJECT="$WANDB_PROJECT",\
 WANDB_ENTITY="$WANDB_ENTITY",\
-WANDB_NAME="meru_coop_${MODE}${RUN_NAME:+_$RUN_NAME}",\
+WANDB_NAME="meru_coop_${MODE}_${DATETIME}",\
 WANDB_DIR="$WANDB_DIR",\
 WANDB_MODE="$WANDB_MODE" \
     "$SCRIPT_DIR/03_meru_full_pipeline.slurm")
 
 echo "      Job ID: $MERU_JOB"
-echo "      → Runs in PARALLEL with Zero-shot and CLIP"
+echo "      → Runs in PARALLEL with Zero-shot CLIP, Zero-shot MERU, and CLIP"
 echo ""
 
 # ============================================================================
-# STAGE 5: Comparison (runs after all complete)
+# STAGE 6: Comparison (runs after all complete)
 # ============================================================================
-echo "[5/5] Submitting Comparison report..."
+# echo "[6/6] Submitting Comparison report..."
 
-CLIP_CHECKPOINT="$CLIP_OUTPUT_DIR/checkpoints/best_model.pth"
-MERU_CHECKPOINT="$MERU_OUTPUT_DIR/checkpoints/best_model.pth"
+# CLIP_CHECKPOINT="$CLIP_OUTPUT_DIR/checkpoints/best_model.pth"
+# MERU_CHECKPOINT="$MERU_OUTPUT_DIR/checkpoints/best_model.pth"
 
-COMPARE_JOB=$(sbatch --parsable \
-    --partition="$PARTITION" \
-    --account="$ACCOUNT" \
-    --dependency=afterok:$ZEROSHOT_JOB:$CLIP_JOB:$MERU_JOB \
-    --export=ALL,\
-PYTHON_ENV="$PYTHON_ENV",\
-EMOSET_ROOT="$EMOSET_ROOT",\
-PRETRAINED_CLIP="$PRETRAINED_CLIP",\
-PRETRAINED_MERU="$PRETRAINED_MERU",\
-CLIP_COOP_CHECKPOINT="$CLIP_CHECKPOINT",\
-MERU_COOP_CHECKPOINT="$MERU_CHECKPOINT",\
-EVAL_SPLIT="test" \
-    "$SCRIPT_DIR/04_compare_all.slurm")
+# COMPARE_JOB=$(sbatch --parsable \
+#     --partition="$PARTITION" \
+#     --account="$ACCOUNT" \
+#     --dependency=afterok:$ZEROSHOT_CLIP_JOB:$ZEROSHOT_MERU_JOB:$CLIP_JOB:$MERU_JOB \
+#     --output="$SLURM_OUT_DIR/emoset_compare_${EXPERIMENT_ID}_%j.txt" \
+#     --error="$SLURM_ERROR_DIR/emoset_compare_${EXPERIMENT_ID}_%j.txt" \
+#     --export=ALL,\
+# PYTHON_ENV="$PYTHON_ENV",\
+# EMOSET_ROOT="$EMOSET_ROOT",\
+# PRETRAINED_CLIP="$PRETRAINED_CLIP",\
+# PRETRAINED_MERU="$PRETRAINED_MERU",\
+# CLIP_COOP_CHECKPOINT="$CLIP_CHECKPOINT",\
+# MERU_COOP_CHECKPOINT="$MERU_CHECKPOINT",\
+# EVAL_SPLIT="test" \
+#     "$SCRIPT_DIR/04_compare_all.slurm")
 
-echo "      Job ID: $COMPARE_JOB"
-echo "      → Runs AFTER all three experiments complete"
-echo ""
+# echo "      Job ID: $COMPARE_JOB"
+# echo "      → Runs AFTER all four experiments complete"
+# echo ""
 
 # ============================================================================
 # SAVE SUBMISSION INFO
@@ -382,11 +434,12 @@ Mode: $MODE
 Experiment ID: $EXPERIMENT_ID
 
 Job IDs:
-  Setup:      $SETUP_JOB
-  Zero-shot:  $ZEROSHOT_JOB
-  CLIP:       $CLIP_JOB
-  MERU:       $MERU_JOB
-  Comparison: $COMPARE_JOB
+  Setup:           $SETUP_JOB
+  Zero-shot CLIP:  $ZEROSHOT_CLIP_JOB
+  Zero-shot MERU:  $ZEROSHOT_MERU_JOB
+  CLIP:            $CLIP_JOB
+  MERU:            $MERU_JOB
+  Comparison:      $COMPARE_JOB
 
 Configuration:
   Dataset: $EMOSET_ROOT
@@ -424,13 +477,18 @@ SLURM Outputs:
 
 Monitoring Commands:
   squeue -u \$USER
-  sacct -j $SETUP_JOB,$ZEROSHOT_JOB,$CLIP_JOB,$MERU_JOB,$COMPARE_JOB
+  sacct -j $SETUP_JOB,$ZEROSHOT_CLIP_JOB,$ZEROSHOT_MERU_JOB,$CLIP_JOB,$MERU_JOB,$COMPARE_JOB
 
 Cancel Commands:
-  scancel $SETUP_JOB $ZEROSHOT_JOB $CLIP_JOB $MERU_JOB $COMPARE_JOB
+  scancel $SETUP_JOB $ZEROSHOT_CLIP_JOB $ZEROSHOT_MERU_JOB $CLIP_JOB $MERU_JOB $COMPARE_JOB
 
 View Logs:
-  tail -f $SLURM_OUT_DIR/emoset_*_{$SETUP_JOB,$ZEROSHOT_JOB,$CLIP_JOB,$MERU_JOB,$COMPARE_JOB}.txt
+  tail -f $SLURM_OUT_DIR/emoset_setup_${EXPERIMENT_ID}_$SETUP_JOB.txt
+  tail -f $SLURM_OUT_DIR/emoset_zero_shot_clip_${EXPERIMENT_ID}_$ZEROSHOT_CLIP_JOB.txt
+  tail -f $SLURM_OUT_DIR/emoset_zero_shot_meru_${EXPERIMENT_ID}_$ZEROSHOT_MERU_JOB.txt
+  tail -f $SLURM_OUT_DIR/emoset_clip_coop_${EXPERIMENT_ID}_$CLIP_JOB.txt
+  tail -f $SLURM_OUT_DIR/emoset_meru_coop_${EXPERIMENT_ID}_$MERU_JOB.txt
+  tail -f $SLURM_OUT_DIR/emoset_compare_${EXPERIMENT_ID}_$COMPARE_JOB.txt
 
 EOF
 
@@ -445,7 +503,8 @@ echo ""
 echo "Job dependency structure:"
 echo ""
 echo "  Setup ($SETUP_JOB)"
-echo "     ├─→ Zero-shot ($ZEROSHOT_JOB) [PARALLEL]"
+echo "     ├─→ Zero-shot CLIP ($ZEROSHOT_CLIP_JOB) [PARALLEL]"
+echo "     ├─→ Zero-shot MERU ($ZEROSHOT_MERU_JOB) [PARALLEL]"
 echo "     ├─→ CLIP ($CLIP_JOB) [PARALLEL]"
 echo "     └─→ MERU ($MERU_JOB) [PARALLEL]"
 echo "          └─→ Comparison ($COMPARE_JOB) [after all]"
@@ -474,18 +533,19 @@ echo "  squeue -u \$USER"
 echo "  watch -n 5 squeue -u \$USER"
 echo ""
 echo "Check job status:"
-echo "  sacct -j $SETUP_JOB,$ZEROSHOT_JOB,$CLIP_JOB,$MERU_JOB,$COMPARE_JOB"
+echo "  sacct -j $SETUP_JOB,$ZEROSHOT_CLIP_JOB,$ZEROSHOT_MERU_JOB,$CLIP_JOB,$MERU_JOB,$COMPARE_JOB"
 echo ""
 echo "View live logs:"
-echo "  tail -f $SLURM_OUT_DIR/emoset_zero_shot_full_$ZEROSHOT_JOB.txt"
-echo "  tail -f $SLURM_OUT_DIR/emoset_clip_full_$CLIP_JOB.txt"
-echo "  tail -f $SLURM_OUT_DIR/emoset_meru_full_$MERU_JOB.txt"
+echo "  tail -f $SLURM_OUT_DIR/emoset_zero_shot_clip_${EXPERIMENT_ID}_$ZEROSHOT_CLIP_JOB.txt"
+echo "  tail -f $SLURM_OUT_DIR/emoset_zero_shot_meru_${EXPERIMENT_ID}_$ZEROSHOT_MERU_JOB.txt"
+echo "  tail -f $SLURM_OUT_DIR/emoset_clip_coop_${EXPERIMENT_ID}_$CLIP_JOB.txt"
+echo "  tail -f $SLURM_OUT_DIR/emoset_meru_coop_${EXPERIMENT_ID}_$MERU_JOB.txt"
 echo ""
 echo "View error logs:"
 echo "  tail -f $SLURM_ERROR_DIR/emoset_*_$CLIP_JOB.txt"
 echo ""
 echo "Cancel all jobs:"
-echo "  scancel $SETUP_JOB $ZEROSHOT_JOB $CLIP_JOB $MERU_JOB $COMPARE_JOB"
+echo "  scancel $SETUP_JOB $ZEROSHOT_CLIP_JOB $ZEROSHOT_MERU_JOB $CLIP_JOB $MERU_JOB $COMPARE_JOB"
 echo ""
 
 if [ "$WANDB_MODE" != "disabled" ]; then

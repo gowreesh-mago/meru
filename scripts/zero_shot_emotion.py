@@ -14,12 +14,13 @@ Usage:
 """
 
 import argparse
+import json
+import warnings
 from pathlib import Path
 
 import torch
 from loguru import logger
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix, f1_score
-from torch.cuda import amp
 from torch.utils.data import DataLoader, Subset
 
 # Register Emoset dataset
@@ -30,7 +31,10 @@ from meru.encoders.image_encoders import build_timm_vit
 from meru.encoders.text_encoders import TransformerTextEncoder
 from meru.models import CLIPBaseline, MERU
 from meru.tokenizer import Tokenizer
+import meru.lorentz as L
 from meru.utils.wandb_logger import WandbLogger
+
+warnings.filterwarnings("ignore", message="torch.meshgrid: in an upcoming release")
 
 # Emotion class names
 EMOTION_NAMES = EMOTION_CLASS_NAMES
@@ -148,10 +152,9 @@ def zero_shot_predict(model, images, text_features, num_classes, device):
         # Compute similarity with all prompts
         if isinstance(model, MERU):
             # Use Lorentzian distance for MERU
-            import meru.lorentz as L
             similarity = -L.pairwise_dist(
-                image_features.unsqueeze(1),  # (B, 1, D)
-                text_features.unsqueeze(0),   # (1, N, D)
+                image_features,   # (B, D)
+                text_features,    # (N, D)
                 model.curv.exp()
             )
         else:
@@ -189,7 +192,7 @@ def evaluate_zero_shot(model, dataloader, device, model_type):
             images = batch["image"].to(device)
             labels = batch["emotion_label_idx"]
 
-            with amp.autocast(enabled=True):
+            with torch.amp.autocast("cuda", enabled=True):
                 logits = zero_shot_predict(model, images, text_features, num_classes, device)
 
             preds = logits.argmax(dim=-1).cpu().numpy()
@@ -295,7 +298,6 @@ def main(args):
     logger.info(results["classification_report"])
 
     # Save results (JSON)
-    import json
     results_file = output_dir / f"{args.model_type}_zero_shot_{args.split}.json"
     with open(results_file, "w") as f:
         json.dump({

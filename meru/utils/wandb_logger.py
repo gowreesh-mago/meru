@@ -80,9 +80,21 @@ class WandbLogger:
         # Create wandb directory
         os.makedirs(wandb_dir, exist_ok=True)
 
+        # On SLURM nodes the wandb service subprocess fails to bind its IPC
+        # port (ServicePollForTokenError). Running the service as a thread in
+        # the same process avoids subprocess/port-file issues while keeping
+        # online logging. Users can override via WANDB_START_METHOD.
+        start_method = os.getenv("WANDB_START_METHOD", None)
+        if start_method is None and os.getenv("SLURM_JOB_ID"):
+            start_method = "thread"
+
+        settings = wandb.Settings(start_method=start_method) if start_method is not None else None
+
+        # wandb.init is an external service call that can raise unpredictably
+        # (e.g. ServicePollForTokenError on SLURM nodes). Catch at this boundary
+        # so a wandb outage never aborts training.
         try:
-            # Initialize wandb
-            self.run = wandb.init(
+            run = wandb.init(
                 project=project,
                 entity=entity,
                 name=run_name,
@@ -92,16 +104,21 @@ class WandbLogger:
                 group=group,
                 dir=wandb_dir,
                 mode=mode,
+                settings=settings,
             )
-            self.enabled = True
-            print(f"✓ wandb initialized: {project}" + (f"/{entity}" if entity else ""))
-            if run_name:
-                print(f"  Run name: {run_name}")
-            print(f"  Mode: {mode}")
-            print(f"  URL: {self.run.url if hasattr(self.run, 'url') else 'N/A'}")
-        except Exception as e:
-            print(f"⚠️  Failed to initialize wandb: {e}")
-            self.enabled = False
+        except Exception as exc:
+            print(f"⚠️  wandb init failed ({exc.__class__.__name__}: {exc}) — logging disabled")
+            return
+        if run is None:
+            print("⚠️  wandb.init returned None — logging disabled")
+            return
+        self.run = run
+        self.enabled = True
+        print(f"✓ wandb initialized: {project}" + (f"/{entity}" if entity else ""))
+        if run_name:
+            print(f"  Run name: {run_name}")
+        print(f"  Mode: {mode}")
+        print(f"  URL: {self.run.url if hasattr(self.run, 'url') else 'N/A'}")
 
     def log(self, metrics: Dict[str, Any], step: Optional[int] = None, commit: bool = True):
         """
@@ -115,13 +132,10 @@ class WandbLogger:
         if not self.enabled or self.run is None:
             return
 
-        try:
-            if step is not None:
-                wandb.log(metrics, step=step, commit=commit)
-            else:
-                wandb.log(metrics, commit=commit)
-        except Exception as e:
-            print(f"⚠️  Failed to log to wandb: {e}")
+        if step is not None:
+            wandb.log(metrics, step=step, commit=commit)
+        else:
+            wandb.log(metrics, commit=commit)
 
     def log_artifact(self, artifact_path: str, artifact_type: str, name: Optional[str] = None):
         """
@@ -135,15 +149,12 @@ class WandbLogger:
         if not self.enabled or self.run is None:
             return
 
-        try:
-            artifact = wandb.Artifact(
-                name=name or os.path.basename(artifact_path),
-                type=artifact_type
-            )
-            artifact.add_file(artifact_path)
-            self.run.log_artifact(artifact)
-        except Exception as e:
-            print(f"⚠️  Failed to log artifact to wandb: {e}")
+        artifact = wandb.Artifact(
+            name=name or os.path.basename(artifact_path),
+            type=artifact_type
+        )
+        artifact.add_file(artifact_path)
+        self.run.log_artifact(artifact)
 
     def watch(self, model, log: str = "all", log_freq: int = 1000):
         """
@@ -157,21 +168,15 @@ class WandbLogger:
         if not self.enabled or self.run is None:
             return
 
-        try:
-            wandb.watch(model, log=log, log_freq=log_freq)
-        except Exception as e:
-            print(f"⚠️  Failed to watch model with wandb: {e}")
+        wandb.watch(model, log=log, log_freq=log_freq)
 
     def finish(self):
         """Finish the wandb run."""
         if not self.enabled or self.run is None:
             return
 
-        try:
-            wandb.finish()
-            print("✓ wandb run finished")
-        except Exception as e:
-            print(f"⚠️  Failed to finish wandb run: {e}")
+        wandb.finish()
+        print("✓ wandb run finished")
 
     def __enter__(self):
         """Context manager entry."""

@@ -1,6 +1,11 @@
 """
-Trace exactly where gradient breaks inside PromptLearner:
-  prompts receives grad (norm 4.02) but ctx.grad is 0.
+Trace gradient flow inside PromptLearner using the fixed TextEncoder.forward.
+
+Previously prompts received grad but ctx.grad was zero due to the NLD→LND
+permutation bug. This script verifies the fix: ctx must receive a non-zero
+gradient through the full forward path.
+
+Run: python tests/debug_ctx_gradient.py
 """
 import sys
 from pathlib import Path
@@ -33,6 +38,7 @@ print(f"ctx.requires_grad = {pl.ctx.requires_grad}")
 print(f"ctx.shape = {pl.ctx.shape}")
 print(f"token_prefix.requires_grad = {pl.token_prefix.requires_grad}")
 print(f"token_suffix.requires_grad = {pl.token_suffix.requires_grad}")
+print(f"logit_scale.requires_grad = {model.logit_scale.requires_grad}  (should be False)")
 
 # ---- Manually replicate PromptLearner.forward() with hooks ----
 hooks = {}
@@ -59,14 +65,14 @@ print(f"ctx_e.grad_fn   = {ctx_e.grad_fn}")
 print(f"ctx_u.grad_fn   = {ctx_u.grad_fn}")
 print(f"ctx.is_leaf     = {ctx.is_leaf}")
 
-# Now run through text encoder manually
+# Now run through text encoder using the FIXED forward (no permutes)
 te = model.text_encoder
 tok = model.tokenized_prompts.to(DEVICE)
 
 x = prompts + te.positional_embedding.type(te.dtype)
-x = x.permute(1, 0, 2)
-x = te.transformer(x)
-x = x.permute(1, 0, 2)
+seq_len = x.shape[1]
+attn_mask = te.attn_mask[:seq_len, :seq_len]
+x = te.transformer(x, attn_mask)   # NLD throughout — no permute
 x = te.ln_final(x).type(te.dtype)
 eot = tok.argmax(dim=-1)
 x = x[torch.arange(x.shape[0]), eot]
@@ -87,9 +93,19 @@ loss.backward()
 print("\nGradient norms at each stage:")
 for name, (norm, shape, ctx_slice_norm) in hooks.items():
     extra = f", ctx_positions[1:5] norm={ctx_slice_norm:.6f}" if ctx_slice_norm is not None else ""
-    print(f"  {name:20s}: norm={norm:.6f}, shape={tuple(shape)}{extra}")
+    ok = "OK" if norm > 0 else "ZERO ← BUG"
+    print(f"  {name:20s}: norm={norm:.6f}, shape={tuple(shape)}{extra}  [{ok}]")
 
-print(f"\nctx.grad = {pl.ctx.grad}")
+ctx_grad = pl.ctx.grad
+if ctx_grad is None:
+    print(f"\nctx.grad = None  ← BUG")
+else:
+    norm = ctx_grad.norm().item()
+    print(f"\nctx.grad norm = {norm:.8f}", end="")
+    if norm > 0:
+        print("  ← OK: non-zero gradient reaches ctx")
+    else:
+        print("  ← BUG: ctx.grad is all zeros")
 
 # ---- Sanity check: simple differentiability of the pattern ----
 print("\n" + "=" * 60)

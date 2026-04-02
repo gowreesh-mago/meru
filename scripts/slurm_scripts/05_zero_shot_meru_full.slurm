@@ -1,9 +1,9 @@
 #!/bin/bash
 
 # General job information and output files
-#SBATCH --job-name=emoset_zero_shot_full
-#SBATCH --output=/home/gmago/Emotions/outputs/slurm_out/emoset_zero_shot_full_%j.txt
-#SBATCH --error=/home/gmago/Emotions/outputs/slurm_error/emoset_zero_shot_full_%j.txt
+#SBATCH --job-name=emoset_zero_shot_meru
+#SBATCH --output=/home/gmago/Emotions/outputs/slurm_out/emoset_zero_shot_meru_%j.txt
+#SBATCH --error=/home/gmago/Emotions/outputs/slurm_error/emoset_zero_shot_meru_%j.txt
 #SBATCH --partition=hava
 #SBATCH --account=havausers
 
@@ -32,13 +32,13 @@ export PYTHONPATH="/home/gmago/Emotions/code/meru:/home/gmago/Emotions/code/meru
 
 # Configuration
 export EMOSET_ROOT="/ivi/zfs/s0/original_homes/gmago/emoset"
-export PRETRAINED_CLIP="/ivi/zfs/s0/original_homes/gmago/models/clip_vit_b.pth"
-export PRETRAINED_CHECKPOINT="$PRETRAINED_CLIP"
+export PRETRAINED_MERU="/ivi/zfs/s0/original_homes/gmago/models/meru_vit_b.pth"
+export PRETRAINED_CHECKPOINT="$PRETRAINED_MERU"
 
 # Weights & Biases configuration
 export WANDB_PROJECT="${WANDB_PROJECT:-emotion-classification}"
 export WANDB_ENTITY="${WANDB_ENTITY:-}"  # Set your wandb username/team
-export WANDB_NAME="${WANDB_NAME:-zero_shot_clip_${SLURM_JOB_ID}}"
+export WANDB_NAME="${WANDB_NAME:-zero_shot_meru_${SLURM_JOB_ID}}"
 export WANDB_DIR="/home/gmago/Emotions/outputs/wandb"
 export WANDB_MODE="${WANDB_MODE:-online}"  # Set to 'offline' to disable syncing
 mkdir -p "$WANDB_DIR"
@@ -51,7 +51,7 @@ else
 fi
 
 echo "=========================================="
-echo "ZERO-SHOT CLIP EVALUATION"
+echo "ZERO-SHOT MERU EVALUATION"
 echo "=========================================="
 echo "Starting at: $(date)"
 echo ""

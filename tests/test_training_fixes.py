@@ -344,13 +344,43 @@ class TestCtxGradientFlow(unittest.TestCase):
         self._check_ctx_grad(model, "MERUCoOpEmotion")
 
     def test_frozen_encoder_params_have_no_grad(self):
-        """Visual encoder weights must have requires_grad=False."""
+        """All CLIP params except prompt_learner (including logit_scale) must be frozen."""
         model = _build_clip_coop(n_ctx=4)
+        prompt_learner_ids = {id(p) for p in model.prompt_learner.parameters()}
         for name, param in model.named_parameters():
-            if "prompt_learner" not in name and "logit_scale" not in name:
+            if id(param) in prompt_learner_ids:
+                self.assertTrue(
+                    param.requires_grad,
+                    f"Prompt-learner param '{name}' should be trainable but is frozen",
+                )
+            else:
                 self.assertFalse(
                     param.requires_grad,
-                    f"Param '{name}' should be frozen but requires_grad=True",
+                    f"Param '{name}' should be frozen (incl. logit_scale) but requires_grad=True",
+                )
+
+    def test_meru_frozen_encoder_params_have_no_grad(self):
+        """For MERU+CoOp, only prompt_learner.ctx and the three hyperbolic params
+        (curv, visual_alpha, textual_alpha) must be trainable. Everything else —
+        including logit_scale inherited from CLIPBaseline — must be frozen."""
+        model = _build_meru_coop(n_ctx=4)
+        # Identity set of expected-trainable params
+        expected_trainable_ids = {id(p) for p in model.prompt_learner.parameters()}
+        expected_trainable_ids.add(id(model.meru.curv))
+        expected_trainable_ids.add(id(model.meru.visual_alpha))
+        expected_trainable_ids.add(id(model.meru.textual_alpha))
+
+        for name, param in model.named_parameters():
+            if id(param) in expected_trainable_ids:
+                self.assertTrue(
+                    param.requires_grad,
+                    f"MERU param '{name}' should be trainable but is frozen",
+                )
+            else:
+                self.assertFalse(
+                    param.requires_grad,
+                    f"MERU param '{name}' should be frozen but requires_grad=True "
+                    "(logit_scale and all encoder weights must not be trainable)",
                 )
 
     def test_only_ctx_updated_after_step(self):

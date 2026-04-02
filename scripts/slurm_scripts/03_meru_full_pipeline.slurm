@@ -21,6 +21,12 @@
 # Activate environment
 source "$PYTHON_ENV"
 
+# Load shared config (API keys, secrets)
+CONFIG_FILE="/home/gmago/Emotions/code/meru/scripts/slurm_scripts/config.sh"
+if [ -f "$CONFIG_FILE" ]; then
+    source "$CONFIG_FILE"
+fi
+
 # Set PYTHONPATH (add both meru and emoset directories)
 export PYTHONPATH="/home/gmago/Emotions/code/meru:/home/gmago/Emotions/code/meru/emoset:${PYTHONPATH:-}"
 
@@ -31,10 +37,17 @@ export PRETRAINED_MERU="/ivi/zfs/s0/original_homes/gmago/models/meru_vit_b.pth"
 # Weights & Biases configuration
 export WANDB_PROJECT="${WANDB_PROJECT:-emotion-classification}"
 export WANDB_ENTITY="${WANDB_ENTITY:-}"  # Set your wandb username/team
-export WANDB_NAME="meru_coop_${SLURM_JOB_ID}"
+export WANDB_NAME="${WANDB_NAME:-meru_coop_${SLURM_JOB_ID}}"
 export WANDB_DIR="/home/gmago/Emotions/outputs/wandb"
 export WANDB_MODE="${WANDB_MODE:-online}"  # Set to 'offline' to disable syncing
 mkdir -p "$WANDB_DIR"
+
+# Authenticate with wandb if API key is provided
+if [ -n "$WANDB_API_KEY" ]; then
+    wandb login "$WANDB_API_KEY"
+else
+    echo "⚠️  WANDB_API_KEY not set — wandb may fail to authenticate. Run: export WANDB_API_KEY=your_key"
+fi
 
 # Set output directory (can be overridden via --export when submitting)
 if [ -z "$EXPERIMENT_DIR" ]; then
@@ -42,12 +55,12 @@ if [ -z "$EXPERIMENT_DIR" ]; then
 fi
 
 # MERU training parameters
-export OUTPUT_DIR="$EXPERIMENT_DIR/meru_coop"
-export NUM_EPOCHS="100"
-export BATCH_SIZE="32"
-export LEARNING_RATE="0.002"
-export NUM_CTX="16"
-export ENTAIL_WEIGHT="0.2"
+export OUTPUT_DIR="${OUTPUT_DIR:-$EXPERIMENT_DIR/meru_coop}"
+export NUM_EPOCHS="${NUM_EPOCHS:-50}"
+export BATCH_SIZE="${BATCH_SIZE:-32}"
+export LEARNING_RATE="${LEARNING_RATE:-0.002}"
+export NUM_CTX="${NUM_CTX:-16}"
+export ENTAIL_WEIGHT="${ENTAIL_WEIGHT:-0.2}"
 export LOG_DIR="$OUTPUT_DIR/logs"
 
 mkdir -p "$OUTPUT_DIR"

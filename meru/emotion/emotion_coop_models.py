@@ -197,6 +197,11 @@ class CLIPCoOpEmotion(nn.Module):
         self.image_encoder = clip_model.visual
         self.visual_proj = clip_model.visual_proj
         self.logit_scale = clip_model.logit_scale
+        # logit_scale is not in the optimizer; freeze it so it is excluded from
+        # clip_grad_norm_(model.parameters()) and optimizer.zero_grad() gaps.
+        # Leaving it unfrozen causes its still-scaled grad (≈65536×true_grad)
+        # to dominate the total norm, making clip_coeff≈0 and zeroing ctx.grad.
+        self.logit_scale.requires_grad = False
 
         # Only prompt_learner parameters are trainable
         self.dtype = torch.float32
@@ -347,6 +352,13 @@ class MERUCoOpEmotion(nn.Module):
         # Store MERU model and components
         self.meru = meru_model
         self.entail_weight = entail_weight
+
+        # logit_scale is inherited from CLIPBaseline but is never used in
+        # MERUCoOpEmotion.forward (we use Lorentzian distance, not cosine sim).
+        # It is NOT in the optimizer, so optimizer.zero_grad() won't zero it and
+        # scaler.unscale_() won't unscale it. Freeze it to uphold the invariant:
+        # every non-optimizer param must have requires_grad=False.
+        self.meru.logit_scale.requires_grad = False
 
         # Keep MERU's hyperbolic parameters trainable
         # (curv, visual_alpha, textual_alpha are already Parameters in meru_model)
