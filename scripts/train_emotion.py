@@ -10,6 +10,7 @@ Usage:
 """
 
 import argparse
+import json
 import random
 import time
 import warnings
@@ -22,7 +23,7 @@ import torch.nn.functional as F
 from hydra.utils import instantiate
 from loguru import logger
 from omegaconf.errors import ConfigAttributeError
-from sklearn.metrics import accuracy_score, f1_score
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
@@ -30,12 +31,47 @@ from torch.utils.tensorboard import SummaryWriter
 import meru.emotion.dataset_integration  # noqa: F401
 from emoset.Emoset import EmoSet
 from meru.config import LazyConfig
+from meru.emotion.emotion_classes import EMOTION_CLASS_NAMES
 from meru.emotion.emotion_coop_models import CLIPCoOpEmotion, MERUCoOpEmotion
 from meru.utils.checkpointing import CheckpointManager
 from meru.utils.wandb_logger import WandbLogger
 
 warnings.filterwarnings("ignore", message="torch.meshgrid: in an upcoming release")
 warnings.filterwarnings("ignore", message=".*torch.cuda.amp.autocast.*", category=FutureWarning)
+
+
+def save_metrics_json(metrics_dict: dict, filepath: Path):
+    """Save metrics dictionary to JSON file."""
+    # Convert any numpy types to Python native types
+    def convert_to_serializable(obj):
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, (np.floating, np.integer)):
+            return float(obj) if isinstance(obj, np.floating) else int(obj)
+        if isinstance(obj, dict):
+            return {k: convert_to_serializable(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [convert_to_serializable(item) for item in obj]
+        return obj
+
+    serializable = convert_to_serializable(metrics_dict)
+    with open(filepath, "w") as f:
+        json.dump(serializable, f, indent=2)
+
+
+def compute_classwise_accuracy(y_true, y_pred, class_names):
+    """Compute per-class accuracy and return as dictionary."""
+    cm = confusion_matrix(y_true, y_pred, labels=list(range(len(class_names))))
+    per_class_correct = np.diag(cm)
+    per_class_total = cm.sum(axis=1)
+    per_class_acc = {}
+    for i, name in enumerate(class_names):
+        if per_class_total[i] > 0:
+            per_class_acc[name] = float(per_class_correct[i] / per_class_total[i] * 100)
+        else:
+            per_class_acc[name] = 0.0
+    return per_class_acc, cm.tolist()
+
 
 # fmt: off
 parser = argparse.ArgumentParser(description=__doc__)
@@ -82,9 +118,11 @@ def main(_A: argparse.Namespace):
     # Setup device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Create output directory
+    # Create output directory and metrics subdirectory
     output_dir = Path(_A.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    metrics_dir = output_dir / "metrics"
+    metrics_dir.mkdir(parents=True, exist_ok=True)
 
     # Setup logging to file if log_dir is specified
     if _A.log_dir is not None:
@@ -366,6 +404,9 @@ def main(_A: argparse.Namespace):
     # Global step counter for wandb logging
     global_step = 0
 
+    # Track best metrics for JSON saving
+    best_metrics = {"best_val_acc": 0.0, "best_epoch": 0}
+
     for epoch in range(start_epoch, num_epochs):
         epoch_start_time = time.time()
 
@@ -382,6 +423,17 @@ def main(_A: argparse.Namespace):
         train_preds, train_labels = [], []
 
         scaler_skip_count = 0  # track how many steps AMP skips due to overflow
+
+        # Accumulators for MERU-specific metrics (for epoch averages)
+        meru_metrics_accum = {
+            "image_norm_mean": [], "image_norm_std": [],
+            "text_norm_mean": [], "text_norm_std": [],
+            "entailment_violations": [], "contrastive_violations": [],
+            "entailment_violation_rate": [], "contrastive_violation_rate": [],
+            "misclassified_with_entail_violation": [], "misclassified_pred_entail_valid": [],
+            "angle_mean": [], "aperture_mean": [],
+            "contrastive_loss": [], "entailment_loss": [],
+        }
 
         for batch_idx, batch in enumerate(train_loader):
             images = batch["image"].to(device)
@@ -431,7 +483,7 @@ def main(_A: argparse.Namespace):
             # Compute batch accuracy
             batch_acc = accuracy_score(labels.cpu().numpy(), preds) * 100
 
-            # Log step-level metrics to wandb
+            # Log step-level metrics to wandb (streamlined - only essential)
             step_metrics = {
                 "train/step_loss": loss.item(),
                 "train/step_accuracy": batch_acc,
@@ -441,11 +493,30 @@ def main(_A: argparse.Namespace):
 
             # Add MERU-specific metrics if applicable
             if isinstance(model, MERUCoOpEmotion) and "contrastive_loss" in output:
+                # Essential MERU metrics for WandB
                 step_metrics["train/step_contrastive_loss"] = output["contrastive_loss"].item()
                 step_metrics["train/step_entailment_loss"] = output["entailment_loss"].item()
                 step_metrics["meru/curv"] = model.meru.curv.exp().item()
                 step_metrics["meru/visual_alpha"] = model.meru.visual_alpha.exp().item()
                 step_metrics["meru/textual_alpha"] = model.meru.textual_alpha.exp().item()
+
+                # Norm tracking for WandB (useful for debugging hyperbolic geometry)
+                metrics = output.get("metrics", {})
+                step_metrics["meru/image_norm_mean"] = metrics.get("image_norm_mean", 0)
+                step_metrics["meru/text_norm_mean"] = metrics.get("text_norm_mean", 0)
+
+                # Violation rates for WandB (key insight metrics)
+                step_metrics["meru/entailment_violation_rate"] = metrics.get("entailment_violation_rate", 0)
+                step_metrics["meru/contrastive_violation_rate"] = metrics.get("contrastive_violation_rate", 0)
+
+                # Accumulate for epoch-level JSON
+                for key in meru_metrics_accum:
+                    if key in metrics:
+                        meru_metrics_accum[key].append(metrics[key])
+                    elif key == "contrastive_loss":
+                        meru_metrics_accum[key].append(output["contrastive_loss"].item())
+                    elif key == "entailment_loss":
+                        meru_metrics_accum[key].append(output["entailment_loss"].item())
 
             wandb_logger.log(step_metrics, step=global_step)
             global_step += 1
@@ -460,6 +531,11 @@ def main(_A: argparse.Namespace):
         train_loss /= len(train_loader)
         train_acc = accuracy_score(train_labels, train_preds) * 100
         train_f1 = f1_score(train_labels, train_preds, average="macro") * 100
+
+        # Compute class-wise accuracy (verbose - saved to JSON, not WandB)
+        train_classwise_acc, train_confusion_matrix = compute_classwise_accuracy(
+            train_labels, train_preds, EMOTION_CLASS_NAMES
+        )
 
         # Gradient norm of trainable params (prompt ctx) at end of epoch
         grad_norm = sum(
@@ -477,18 +553,40 @@ def main(_A: argparse.Namespace):
             f"Grad norm (ctx): {grad_norm:.4f}"
         )
 
+        # Compute epoch-averaged MERU metrics for JSON
+        epoch_meru_metrics = {}
+        if isinstance(model, MERUCoOpEmotion) and meru_metrics_accum["image_norm_mean"]:
+            for key, values in meru_metrics_accum.items():
+                if values:
+                    epoch_meru_metrics[f"train_{key}_mean"] = float(np.mean(values))
+                    epoch_meru_metrics[f"train_{key}_std"] = float(np.std(values))
+
+            # Log summary MERU metrics
+            logger.info(
+                f"  MERU → Image norm: {epoch_meru_metrics.get('train_image_norm_mean_mean', 0):.4f}, "
+                f"Text norm: {epoch_meru_metrics.get('train_text_norm_mean_mean', 0):.4f}, "
+                f"Entail viol rate: {epoch_meru_metrics.get('train_entailment_violation_rate_mean', 0):.4f}"
+            )
+
         writer.add_scalar("train/loss", train_loss, epoch)
         writer.add_scalar("train/accuracy", train_acc, epoch)
         writer.add_scalar("train/f1", train_f1, epoch)
         writer.add_scalar("lr", scheduler.get_last_lr()[0], epoch)
 
-        # Log epoch-level train summary to wandb
-        wandb_logger.log({
+        # Log epoch-level train summary to wandb (essential metrics only)
+        epoch_wandb_metrics = {
             "train/epoch_loss": train_loss,
             "train/epoch_accuracy": train_acc,
             "train/epoch_f1": train_f1,
-            "epoch": epoch,
-        }, step=global_step)
+        }
+        # Add MERU epoch-level summaries to WandB
+        if isinstance(model, MERUCoOpEmotion) and epoch_meru_metrics:
+            epoch_wandb_metrics["meru/epoch_image_norm"] = epoch_meru_metrics.get("train_image_norm_mean_mean", 0)
+            epoch_wandb_metrics["meru/epoch_text_norm"] = epoch_meru_metrics.get("train_text_norm_mean_mean", 0)
+            epoch_wandb_metrics["meru/epoch_entail_viol_rate"] = epoch_meru_metrics.get("train_entailment_violation_rate_mean", 0)
+            epoch_wandb_metrics["meru/epoch_contrastive_viol_rate"] = epoch_meru_metrics.get("train_contrastive_violation_rate_mean", 0)
+
+        wandb_logger.log(epoch_wandb_metrics, step=global_step)
 
         # ----------------------------------------------------------------
         #   VALIDATION
@@ -498,6 +596,17 @@ def main(_A: argparse.Namespace):
             model.eval()
             val_loss = 0.0
             val_preds, val_labels = [], []
+
+            # Accumulators for MERU-specific validation metrics
+            val_meru_metrics_accum = {
+                "image_norm_mean": [], "image_norm_std": [],
+                "text_norm_mean": [], "text_norm_std": [],
+                "entailment_violations": [], "contrastive_violations": [],
+                "entailment_violation_rate": [], "contrastive_violation_rate": [],
+                "misclassified_with_entail_violation": [], "misclassified_pred_entail_valid": [],
+                "angle_mean": [], "aperture_mean": [],
+                "contrastive_loss": [], "entailment_loss": [],
+            }
 
             with torch.no_grad():
                 for batch_idx, batch in enumerate(val_loader):
@@ -534,7 +643,7 @@ def main(_A: argparse.Namespace):
                             )
                         logger.info(debug_msg)
 
-                    # Log step-level validation metrics to wandb
+                    # Log step-level validation metrics to wandb (streamlined)
                     val_step_metrics = {
                         "val/step_loss": loss.item(),
                         "val/step_accuracy": batch_acc,
@@ -546,6 +655,16 @@ def main(_A: argparse.Namespace):
                         val_step_metrics["val/step_contrastive_loss"] = output["contrastive_loss"].item()
                         val_step_metrics["val/step_entailment_loss"] = output["entailment_loss"].item()
 
+                        # Accumulate for epoch-level JSON
+                        metrics = output.get("metrics", {})
+                        for key in val_meru_metrics_accum:
+                            if key in metrics:
+                                val_meru_metrics_accum[key].append(metrics[key])
+                            elif key == "contrastive_loss":
+                                val_meru_metrics_accum[key].append(output["contrastive_loss"].item())
+                            elif key == "entailment_loss":
+                                val_meru_metrics_accum[key].append(output["entailment_loss"].item())
+
                     wandb_logger.log(val_step_metrics, step=global_step)
                     global_step += 1
 
@@ -553,21 +672,46 @@ def main(_A: argparse.Namespace):
             val_acc = accuracy_score(val_labels, val_preds) * 100
             val_f1 = f1_score(val_labels, val_preds, average="macro") * 100
 
+            # Compute class-wise accuracy (verbose - saved to JSON, not WandB)
+            val_classwise_acc, val_confusion_matrix = compute_classwise_accuracy(
+                val_labels, val_preds, EMOTION_CLASS_NAMES
+            )
+
+            # Compute epoch-averaged MERU validation metrics for JSON
+            val_epoch_meru_metrics = {}
+            if isinstance(model, MERUCoOpEmotion) and val_meru_metrics_accum["image_norm_mean"]:
+                for key, values in val_meru_metrics_accum.items():
+                    if values:
+                        val_epoch_meru_metrics[f"val_{key}_mean"] = float(np.mean(values))
+                        val_epoch_meru_metrics[f"val_{key}_std"] = float(np.std(values))
+
             logger.info(
                 f"  Val   → Loss: {val_loss:.4f}, Acc: {val_acc:.2f}%, F1: {val_f1:.2f}%"
             )
+
+            # Log MERU validation summary
+            if isinstance(model, MERUCoOpEmotion) and val_epoch_meru_metrics:
+                logger.info(
+                    f"  MERU Val → Entail viol rate: {val_epoch_meru_metrics.get('val_entailment_violation_rate_mean', 0):.4f}, "
+                    f"Misclass w/ entail viol: {val_epoch_meru_metrics.get('val_misclassified_with_entail_violation_mean', 0):.2f}"
+                )
 
             writer.add_scalar("val/loss", val_loss, epoch)
             writer.add_scalar("val/accuracy", val_acc, epoch)
             writer.add_scalar("val/f1", val_f1, epoch)
 
-            # Log epoch-level validation summary to wandb
-            wandb_logger.log({
+            # Log epoch-level validation summary to wandb (essential metrics only)
+            val_wandb_metrics = {
                 "val/epoch_loss": val_loss,
                 "val/epoch_accuracy": val_acc,
                 "val/epoch_f1": val_f1,
-                "epoch": epoch,
-            }, step=global_step)
+            }
+            # Add MERU epoch-level summaries to WandB
+            if isinstance(model, MERUCoOpEmotion) and val_epoch_meru_metrics:
+                val_wandb_metrics["meru/val_entail_viol_rate"] = val_epoch_meru_metrics.get("val_entailment_violation_rate_mean", 0)
+                val_wandb_metrics["meru/val_contrastive_viol_rate"] = val_epoch_meru_metrics.get("val_contrastive_violation_rate_mean", 0)
+
+            wandb_logger.log(val_wandb_metrics, step=global_step)
 
             # Epoch summary
             epoch_time = time.time() - epoch_start_time
@@ -576,9 +720,52 @@ def main(_A: argparse.Namespace):
                 f"Best Val: {max(best_val_acc, val_acc):.2f}% | Time: {epoch_time:.1f}s"
             )
 
+            # ----------------------------------------------------------------
+            # Save verbose metrics to JSON (class-wise accuracy, confusion matrix, etc.)
+            # ----------------------------------------------------------------
+            epoch_verbose_metrics = {
+                "epoch": epoch,
+                "train": {
+                    "loss": train_loss,
+                    "accuracy": train_acc,
+                    "f1": train_f1,
+                    "classwise_accuracy": train_classwise_acc,
+                    "confusion_matrix": train_confusion_matrix,
+                },
+                "val": {
+                    "loss": val_loss,
+                    "accuracy": val_acc,
+                    "f1": val_f1,
+                    "classwise_accuracy": val_classwise_acc,
+                    "confusion_matrix": val_confusion_matrix,
+                },
+            }
+            # Add MERU-specific detailed metrics
+            if isinstance(model, MERUCoOpEmotion):
+                epoch_verbose_metrics["meru"] = {
+                    "curv": model.meru.curv.exp().item(),
+                    "visual_alpha": model.meru.visual_alpha.exp().item(),
+                    "textual_alpha": model.meru.textual_alpha.exp().item(),
+                    "train_metrics": epoch_meru_metrics,
+                    "val_metrics": val_epoch_meru_metrics,
+                }
+
+            # Save to epoch-specific JSON
+            # save_metrics_json(epoch_verbose_metrics, metrics_dir / f"epoch_{epoch:04d}.json")
+
             # Save best model
             if val_acc > best_val_acc:
                 best_val_acc = val_acc
+                best_metrics = {
+                    "best_val_acc": best_val_acc,
+                    "best_epoch": epoch,
+                    "best_train_acc": train_acc,
+                    "best_val_f1": val_f1,
+                    "best_classwise_accuracy": val_classwise_acc,
+                }
+                if isinstance(model, MERUCoOpEmotion):
+                    best_metrics["meru"] = epoch_verbose_metrics.get("meru", {})
+
                 torch.save(
                     {
                         "epoch": epoch,
@@ -589,7 +776,9 @@ def main(_A: argparse.Namespace):
                     },
                     output_dir / "checkpoints" / "best_model.pth",
                 )
-                logger.info(f"  ✓ New best model! Val Acc: {best_val_acc:.2f}% (prev: {val_acc:.2f}%)")
+                # Save best metrics JSON
+                save_metrics_json(best_metrics, metrics_dir / "best_metrics.json")
+                logger.info(f"  ✓ New best model! Val Acc: {best_val_acc:.2f}%")
         else:
             # Still log epoch time even if no validation
             epoch_time = time.time() - epoch_start_time
@@ -611,12 +800,33 @@ def main(_A: argparse.Namespace):
     )
     logger.info(f"✓ Final model saved to {output_dir / 'checkpoints' / 'last_model.pth'}")
 
-    # Log final results to wandb
+    # Save latest metrics JSON
+    latest_metrics = {
+        "final_epoch": num_epochs - 1,
+        "best_val_acc": best_val_acc,
+        "best_epoch": best_metrics.get("best_epoch", 0),
+        "train": {
+            "final_loss": train_loss,
+            "final_accuracy": train_acc,
+            "final_f1": train_f1,
+        },
+    }
+    if isinstance(model, MERUCoOpEmotion):
+        latest_metrics["meru"] = {
+            "curv": model.meru.curv.exp().item(),
+            "visual_alpha": model.meru.visual_alpha.exp().item(),
+            "textual_alpha": model.meru.textual_alpha.exp().item(),
+        }
+    save_metrics_json(latest_metrics, metrics_dir / "latest_metrics.json")
+    logger.info(f"✓ Latest metrics saved to {metrics_dir / 'latest_metrics.json'}")
+
+    # Log final results to wandb (essential summary only)
     wandb_logger.log({"best_val_accuracy": best_val_acc})
 
     writer.close()
     wandb_logger.finish()
     logger.info(f"Training complete! Best val acc: {best_val_acc:.2f}%")
+    logger.info(f"Verbose metrics saved to: {metrics_dir}")
 
 
 if __name__ == "__main__":

@@ -440,7 +440,7 @@ class MERUCoOpEmotion(nn.Module):
             - logits: Classification logits (B, num_emotions)
             - loss: Total loss (if labels provided)
             - contrastive_loss: Cross-entropy classification loss
-            - entailment_loss: Emotion → Image entailment loss
+            - entailment_loss: Emotion → Image entailment loss            - metrics: Detailed metrics for tracking (norms, violations)
         """
         # Clamp hyperbolic params to valid ranges at the top of every forward pass
         # (training AND validation). Mirrors vanilla MERU (models.py:283-289).
@@ -460,6 +460,10 @@ class MERUCoOpEmotion(nn.Module):
             prompts, tokenized_prompts, project_to_hyperbolic=True
         )
 
+        # Compute norms for tracking
+        image_norms = torch.norm(image_features, dim=-1)  # (B,)
+        text_norms = torch.norm(text_features, dim=-1)  # (num_classes,)
+
         # Compute similarity using Lorentzian distance, scaled by logit_scale
         # temperature — same as vanilla MERU (models.py:321-325). logit_scale is
         # frozen here but still provides the pretrained temperature calibration.
@@ -468,11 +472,75 @@ class MERUCoOpEmotion(nn.Module):
         logit_scale = self.meru.logit_scale.exp()
         logits = -distances * logit_scale
 
-        output = {"logits": logits}
+        # Metrics dict for detailed tracking
+        metrics = {
+            "image_norm_mean": image_norms.mean().item(),
+            "image_norm_std": image_norms.std().item(),
+            "image_norm_min": image_norms.min().item(),
+            "image_norm_max": image_norms.max().item(),
+            "text_norm_mean": text_norms.mean().item(),
+            "text_norm_std": text_norms.std().item(),
+            "text_norm_min": text_norms.min().item(),
+            "text_norm_max": text_norms.max().item(),
+            "distance_mean": distances.mean().item(),
+            "distance_std": distances.std().item(),
+        }
+
+        output = {"logits": logits, "metrics": metrics}
 
         if labels is not None:
             # Contrastive loss
             contrastive_loss = F.cross_entropy(logits, labels)
+
+            # Get predictions for violation analysis
+            preds = logits.argmax(dim=-1)
+            batch_size = labels.shape[0]
+
+            # --- Entailment violation analysis ---
+            # For correct-label pairs: check if image is inside the entailment cone
+            text_for_images = text_features[labels]  # (B, embed_dim)
+            angle = L.oxy_angle(text_for_images, image_features, curv)
+            aperture = L.half_aperture(text_for_images, curv)
+            # Violation: image is outside the cone (angle > aperture)
+            entailment_violations = (angle > aperture).float()
+            num_entailment_violations = entailment_violations.sum().item()
+
+            # --- Contrastive/distance violation analysis ---
+            # Check if the predicted class (by distance) is wrong
+            contrastive_correct = (preds == labels).float()
+            num_contrastive_violations = (1.0 - contrastive_correct).sum().item()
+
+            # --- Analyze misclassifications: are they due to entailment or distance? ---
+            # For misclassified samples:
+            #   - "entailment_caused": the correct class had entailment violation
+            #   - "distance_caused": the correct class was NOT closest by distance
+            misclassified_mask = (preds != labels)
+            num_misclassified = misclassified_mask.sum().item()
+
+            if num_misclassified > 0:
+                # Among misclassified: did the correct class have entailment violation?
+                entail_viol_for_misclassified = entailment_violations[misclassified_mask]
+                num_entail_caused = entail_viol_for_misclassified.sum().item()
+
+                # Among misclassified: check if predicted class is closer than correct
+                # (always true by definition, but we can see margin)
+                correct_distances = distances[torch.arange(batch_size, device=distances.device), labels]
+                pred_distances = distances[torch.arange(batch_size, device=distances.device), preds]
+                distance_margin = (correct_distances - pred_distances)[misclassified_mask]
+                avg_distance_margin = distance_margin.mean().item() if num_misclassified > 0 else 0.0
+
+                # Check entailment for predicted (wrong) class
+                text_for_preds = text_features[preds]
+                angle_pred = L.oxy_angle(text_for_preds, image_features, curv)
+                aperture_pred = L.half_aperture(text_for_preds, curv)
+                pred_inside_cone = (angle_pred <= aperture_pred).float()
+                # Misclassified AND predicted class is inside cone (entailment says pred is valid)
+                pred_entail_valid_for_misclassified = pred_inside_cone[misclassified_mask]
+                num_pred_entail_valid = pred_entail_valid_for_misclassified.sum().item()
+            else:
+                num_entail_caused = 0.0
+                avg_distance_margin = 0.0
+                num_pred_entail_valid = 0.0
 
             # Entailment loss: Emotion → Image
             entailment_loss = self.compute_entailment_loss(
@@ -481,6 +549,22 @@ class MERUCoOpEmotion(nn.Module):
 
             # Total loss
             total_loss = contrastive_loss + self.entail_weight * entailment_loss
+
+            # Update metrics with violation info
+            metrics.update({
+                "entailment_violations": num_entailment_violations,
+                "entailment_violation_rate": num_entailment_violations / batch_size,
+                "contrastive_violations": num_contrastive_violations,
+                "contrastive_violation_rate": num_contrastive_violations / batch_size,
+                "num_misclassified": num_misclassified,
+                "misclassified_with_entail_violation": num_entail_caused,
+                "misclassified_pred_entail_valid": num_pred_entail_valid,
+                "misclassified_avg_distance_margin": avg_distance_margin,
+                "angle_mean": angle.mean().item(),
+                "angle_std": angle.std().item(),
+                "aperture_mean": aperture.mean().item(),
+                "aperture_std": aperture.std().item(),
+            })
 
             output.update(
                 {
