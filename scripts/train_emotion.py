@@ -426,12 +426,15 @@ def main(_A: argparse.Namespace):
 
         # Accumulators for MERU-specific metrics (for epoch averages)
         meru_metrics_accum = {
-            "image_norm_mean": [], "image_norm_std": [],
-            "text_norm_mean": [], "text_norm_std": [],
+            "image_norm_mean": [], "image_norm_std": [], "image_norm_min": [], "image_norm_max": [],
+            "text_norm_mean": [], "text_norm_std": [], "text_norm_min": [], "text_norm_max": [],
+            "distance_mean": [], "distance_std": [],
             "entailment_violations": [], "contrastive_violations": [],
             "entailment_violation_rate": [], "contrastive_violation_rate": [],
+            "num_misclassified": [],
             "misclassified_with_entail_violation": [], "misclassified_pred_entail_valid": [],
-            "angle_mean": [], "aperture_mean": [],
+            "misclassified_avg_distance_margin": [],
+            "angle_mean": [], "angle_std": [], "aperture_mean": [], "aperture_std": [],
             "contrastive_loss": [], "entailment_loss": [],
         }
 
@@ -476,7 +479,7 @@ def main(_A: argparse.Namespace):
 
             # Track metrics
             train_loss += loss.item()
-            preds = output["logits"].argmax(dim=-1).cpu().numpy()
+            preds = output["preds"].cpu().numpy()
             train_preds.extend(preds)
             train_labels.extend(labels.cpu().numpy())
 
@@ -493,21 +496,51 @@ def main(_A: argparse.Namespace):
 
             # Add MERU-specific metrics if applicable
             if isinstance(model, MERUCoOpEmotion) and "contrastive_loss" in output:
-                # Essential MERU metrics for WandB
+                # Loss components
                 step_metrics["train/step_contrastive_loss"] = output["contrastive_loss"].item()
                 step_metrics["train/step_entailment_loss"] = output["entailment_loss"].item()
+
+                # Hyperbolic parameters
                 step_metrics["meru/curv"] = model.meru.curv.exp().item()
                 step_metrics["meru/visual_alpha"] = model.meru.visual_alpha.exp().item()
                 step_metrics["meru/textual_alpha"] = model.meru.textual_alpha.exp().item()
 
-                # Norm tracking for WandB (useful for debugging hyperbolic geometry)
+                # All metrics from MERUCoOpEmotion.forward()
                 metrics = output.get("metrics", {})
-                step_metrics["meru/image_norm_mean"] = metrics.get("image_norm_mean", 0)
-                step_metrics["meru/text_norm_mean"] = metrics.get("text_norm_mean", 0)
 
-                # Violation rates for WandB (key insight metrics)
+                # Image norm statistics
+                step_metrics["meru/image_norm_mean"] = metrics.get("image_norm_mean", 0)
+                step_metrics["meru/image_norm_std"] = metrics.get("image_norm_std", 0)
+                step_metrics["meru/image_norm_min"] = metrics.get("image_norm_min", 0)
+                step_metrics["meru/image_norm_max"] = metrics.get("image_norm_max", 0)
+
+                # Text norm statistics
+                step_metrics["meru/text_norm_mean"] = metrics.get("text_norm_mean", 0)
+                step_metrics["meru/text_norm_std"] = metrics.get("text_norm_std", 0)
+                step_metrics["meru/text_norm_min"] = metrics.get("text_norm_min", 0)
+                step_metrics["meru/text_norm_max"] = metrics.get("text_norm_max", 0)
+
+                # Distance statistics
+                step_metrics["meru/distance_mean"] = metrics.get("distance_mean", 0)
+                step_metrics["meru/distance_std"] = metrics.get("distance_std", 0)
+
+                # Violation counts and rates
+                step_metrics["meru/entailment_violations"] = metrics.get("entailment_violations", 0)
                 step_metrics["meru/entailment_violation_rate"] = metrics.get("entailment_violation_rate", 0)
+                step_metrics["meru/contrastive_violations"] = metrics.get("contrastive_violations", 0)
                 step_metrics["meru/contrastive_violation_rate"] = metrics.get("contrastive_violation_rate", 0)
+
+                # Misclassification diagnosis
+                step_metrics["meru/num_misclassified"] = metrics.get("num_misclassified", 0)
+                step_metrics["meru/misclassified_with_entail_violation"] = metrics.get("misclassified_with_entail_violation", 0)
+                step_metrics["meru/misclassified_pred_entail_valid"] = metrics.get("misclassified_pred_entail_valid", 0)
+                step_metrics["meru/misclassified_avg_distance_margin"] = metrics.get("misclassified_avg_distance_margin", 0)
+
+                # Angle and aperture statistics (entailment cone geometry)
+                step_metrics["meru/angle_mean"] = metrics.get("angle_mean", 0)
+                step_metrics["meru/angle_std"] = metrics.get("angle_std", 0)
+                step_metrics["meru/aperture_mean"] = metrics.get("aperture_mean", 0)
+                step_metrics["meru/aperture_std"] = metrics.get("aperture_std", 0)
 
                 # Accumulate for epoch-level JSON
                 for key in meru_metrics_accum:
@@ -581,10 +614,21 @@ def main(_A: argparse.Namespace):
         }
         # Add MERU epoch-level summaries to WandB
         if isinstance(model, MERUCoOpEmotion) and epoch_meru_metrics:
+            # Norm statistics
             epoch_wandb_metrics["meru/epoch_image_norm"] = epoch_meru_metrics.get("train_image_norm_mean_mean", 0)
             epoch_wandb_metrics["meru/epoch_text_norm"] = epoch_meru_metrics.get("train_text_norm_mean_mean", 0)
+
+            # Violation rates
             epoch_wandb_metrics["meru/epoch_entail_viol_rate"] = epoch_meru_metrics.get("train_entailment_violation_rate_mean", 0)
             epoch_wandb_metrics["meru/epoch_contrastive_viol_rate"] = epoch_meru_metrics.get("train_contrastive_violation_rate_mean", 0)
+
+            # Loss components
+            epoch_wandb_metrics["meru/epoch_contrastive_loss"] = epoch_meru_metrics.get("train_contrastive_loss_mean", 0)
+            epoch_wandb_metrics["meru/epoch_entailment_loss"] = epoch_meru_metrics.get("train_entailment_loss_mean", 0)
+
+            # Geometry statistics
+            epoch_wandb_metrics["meru/epoch_angle_mean"] = epoch_meru_metrics.get("train_angle_mean_mean", 0)
+            epoch_wandb_metrics["meru/epoch_aperture_mean"] = epoch_meru_metrics.get("train_aperture_mean_mean", 0)
 
         wandb_logger.log(epoch_wandb_metrics, step=global_step)
 
@@ -599,12 +643,15 @@ def main(_A: argparse.Namespace):
 
             # Accumulators for MERU-specific validation metrics
             val_meru_metrics_accum = {
-                "image_norm_mean": [], "image_norm_std": [],
-                "text_norm_mean": [], "text_norm_std": [],
+                "image_norm_mean": [], "image_norm_std": [], "image_norm_min": [], "image_norm_max": [],
+                "text_norm_mean": [], "text_norm_std": [], "text_norm_min": [], "text_norm_max": [],
+                "distance_mean": [], "distance_std": [],
                 "entailment_violations": [], "contrastive_violations": [],
                 "entailment_violation_rate": [], "contrastive_violation_rate": [],
+                "num_misclassified": [],
                 "misclassified_with_entail_violation": [], "misclassified_pred_entail_valid": [],
-                "angle_mean": [], "aperture_mean": [],
+                "misclassified_avg_distance_margin": [],
+                "angle_mean": [], "angle_std": [], "aperture_mean": [], "aperture_std": [],
                 "contrastive_loss": [], "entailment_loss": [],
             }
 
@@ -618,7 +665,7 @@ def main(_A: argparse.Namespace):
                         loss = output["loss"]
 
                     val_loss += loss.item()
-                    preds = output["logits"].argmax(dim=-1).cpu().numpy()
+                    preds = output["preds"].cpu().numpy()
                     val_preds.extend(preds)
                     val_labels.extend(labels.cpu().numpy())
 
@@ -652,11 +699,48 @@ def main(_A: argparse.Namespace):
 
                     # Add MERU-specific metrics if applicable
                     if isinstance(model, MERUCoOpEmotion) and "contrastive_loss" in output:
+                        # Loss components
                         val_step_metrics["val/step_contrastive_loss"] = output["contrastive_loss"].item()
                         val_step_metrics["val/step_entailment_loss"] = output["entailment_loss"].item()
 
-                        # Accumulate for epoch-level JSON
+                        # All metrics from MERUCoOpEmotion.forward()
                         metrics = output.get("metrics", {})
+
+                        # Image norm statistics
+                        val_step_metrics["meru_val/image_norm_mean"] = metrics.get("image_norm_mean", 0)
+                        val_step_metrics["meru_val/image_norm_std"] = metrics.get("image_norm_std", 0)
+                        val_step_metrics["meru_val/image_norm_min"] = metrics.get("image_norm_min", 0)
+                        val_step_metrics["meru_val/image_norm_max"] = metrics.get("image_norm_max", 0)
+
+                        # Text norm statistics
+                        val_step_metrics["meru_val/text_norm_mean"] = metrics.get("text_norm_mean", 0)
+                        val_step_metrics["meru_val/text_norm_std"] = metrics.get("text_norm_std", 0)
+                        val_step_metrics["meru_val/text_norm_min"] = metrics.get("text_norm_min", 0)
+                        val_step_metrics["meru_val/text_norm_max"] = metrics.get("text_norm_max", 0)
+
+                        # Distance statistics
+                        val_step_metrics["meru_val/distance_mean"] = metrics.get("distance_mean", 0)
+                        val_step_metrics["meru_val/distance_std"] = metrics.get("distance_std", 0)
+
+                        # Violation counts and rates
+                        val_step_metrics["meru_val/entailment_violations"] = metrics.get("entailment_violations", 0)
+                        val_step_metrics["meru_val/entailment_violation_rate"] = metrics.get("entailment_violation_rate", 0)
+                        val_step_metrics["meru_val/contrastive_violations"] = metrics.get("contrastive_violations", 0)
+                        val_step_metrics["meru_val/contrastive_violation_rate"] = metrics.get("contrastive_violation_rate", 0)
+
+                        # Misclassification diagnosis
+                        val_step_metrics["meru_val/num_misclassified"] = metrics.get("num_misclassified", 0)
+                        val_step_metrics["meru_val/misclassified_with_entail_violation"] = metrics.get("misclassified_with_entail_violation", 0)
+                        val_step_metrics["meru_val/misclassified_pred_entail_valid"] = metrics.get("misclassified_pred_entail_valid", 0)
+                        val_step_metrics["meru_val/misclassified_avg_distance_margin"] = metrics.get("misclassified_avg_distance_margin", 0)
+
+                        # Angle and aperture statistics (entailment cone geometry)
+                        val_step_metrics["meru_val/angle_mean"] = metrics.get("angle_mean", 0)
+                        val_step_metrics["meru_val/angle_std"] = metrics.get("angle_std", 0)
+                        val_step_metrics["meru_val/aperture_mean"] = metrics.get("aperture_mean", 0)
+                        val_step_metrics["meru_val/aperture_std"] = metrics.get("aperture_std", 0)
+
+                        # Accumulate for epoch-level JSON
                         for key in val_meru_metrics_accum:
                             if key in metrics:
                                 val_meru_metrics_accum[key].append(metrics[key])
@@ -708,8 +792,25 @@ def main(_A: argparse.Namespace):
             }
             # Add MERU epoch-level summaries to WandB
             if isinstance(model, MERUCoOpEmotion) and val_epoch_meru_metrics:
+                # Violation rates
                 val_wandb_metrics["meru/val_entail_viol_rate"] = val_epoch_meru_metrics.get("val_entailment_violation_rate_mean", 0)
                 val_wandb_metrics["meru/val_contrastive_viol_rate"] = val_epoch_meru_metrics.get("val_contrastive_violation_rate_mean", 0)
+
+                # Loss components
+                val_wandb_metrics["meru/val_contrastive_loss"] = val_epoch_meru_metrics.get("val_contrastive_loss_mean", 0)
+                val_wandb_metrics["meru/val_entailment_loss"] = val_epoch_meru_metrics.get("val_entailment_loss_mean", 0)
+
+                # Norm statistics
+                val_wandb_metrics["meru/val_image_norm"] = val_epoch_meru_metrics.get("val_image_norm_mean_mean", 0)
+                val_wandb_metrics["meru/val_text_norm"] = val_epoch_meru_metrics.get("val_text_norm_mean_mean", 0)
+
+                # Geometry statistics
+                val_wandb_metrics["meru/val_angle_mean"] = val_epoch_meru_metrics.get("val_angle_mean_mean", 0)
+                val_wandb_metrics["meru/val_aperture_mean"] = val_epoch_meru_metrics.get("val_aperture_mean_mean", 0)
+
+                # Misclassification analysis
+                val_wandb_metrics["meru/val_misclassified_with_entail_viol"] = val_epoch_meru_metrics.get("val_misclassified_with_entail_violation_mean", 0)
+                val_wandb_metrics["meru/val_misclassified_pred_entail_valid"] = val_epoch_meru_metrics.get("val_misclassified_pred_entail_valid_mean", 0)
 
             wandb_logger.log(val_wandb_metrics, step=global_step)
 

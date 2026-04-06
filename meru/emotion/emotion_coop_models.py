@@ -255,7 +255,10 @@ class CLIPCoOpEmotion(nn.Module):
         logit_scale = self.logit_scale.exp()
         logits = logit_scale * image_features @ text_features.t()
 
-        output = {"logits": logits, "debug": output_debug}
+        # Compute predictions once here to avoid recomputation in training script
+        preds = logits.argmax(dim=-1)
+
+        output = {"logits": logits, "preds": preds, "debug": output_debug}
 
         if labels is not None:
             loss = F.cross_entropy(logits, labels)
@@ -486,14 +489,15 @@ class MERUCoOpEmotion(nn.Module):
             "distance_std": distances.std().item(),
         }
 
-        output = {"logits": logits, "metrics": metrics}
+        # Compute predictions once here to avoid recomputation in training script
+        preds = logits.argmax(dim=-1)
+
+        output = {"logits": logits, "preds": preds, "metrics": metrics}
 
         if labels is not None:
             # Contrastive loss
             contrastive_loss = F.cross_entropy(logits, labels)
 
-            # Get predictions for violation analysis
-            preds = logits.argmax(dim=-1)
             batch_size = labels.shape[0]
 
             # --- Entailment violation analysis ---
