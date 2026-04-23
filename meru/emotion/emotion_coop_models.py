@@ -91,6 +91,78 @@ class TextEncoder(_CoOpTextEncoder):
 
 from meru import lorentz as L  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# EmotionCLIP training wrapper
+# ---------------------------------------------------------------------------
+
+_EMOTIONCLIP_TRAINABLE_KEYS = ("prefix", "prompt", "ln")
+
+
+class EmotionCLIPEmotion(nn.Module):
+    """
+    EmotionCLIP wrapped for supervised emotion classification training.
+
+    Uses EmotionCLIP's hybrid fine-tuning recipe: only LayerNorm params
+    (any name containing "ln"), prefix embeddings ("prefix"), and soft prompt
+    embeddings ("prompt") are trainable — everything else is frozen.
+
+    Args:
+        emotionclip_model: The loaded EmotionCLIP CLIP instance (float16, cuda).
+        tokenizer_fn: EmotionCLIP's tokenizer callable (clip.tokenize).
+        emotion_names: List of emotion class names (length = num_classes).
+    """
+
+    PROMPT_TEMPLATE = "This picture conveys a sense of {}"
+    # context_length=57 = 77 - 20 (prompt_num); this activates Prompt_block
+    # in CLIP.encode_text (see EmotionCLIP.py:62).
+    CONTEXT_LENGTH = 57
+
+    def __init__(self, emotionclip_model, tokenizer_fn, emotion_names: list[str]):
+        super().__init__()
+        self.model = emotionclip_model
+        self.emotion_names = emotion_names
+
+        # Apply the same freeze recipe used during EmotionCLIP pre-training:
+        # train only prefix / prompt / ln params, freeze everything else.
+        for name, param in self.model.named_parameters():
+            param.requires_grad = any(k in name for k in _EMOTIONCLIP_TRAINABLE_KEYS)
+
+        # logit_scale has requires_grad=False already in EmotionCLIP's Config,
+        # but assert it explicitly to uphold the frozen-param invariant.
+        self.model.logit_scale.requires_grad = False
+
+        # Precompute fixed text tokens at init — shape (num_classes, CONTEXT_LENGTH).
+        text_list = [self.PROMPT_TEMPLATE.format(e) for e in emotion_names]
+        text_tokens = tokenizer_fn(text_list, context_length=self.CONTEXT_LENGTH)
+        self.register_buffer("text_tokens", text_tokens)
+
+    def trainable_parameters(self):
+        return [p for p in self.parameters() if p.requires_grad]
+
+    def forward(self, images: torch.Tensor, labels: torch.Tensor | None = None):
+        """
+        Args:
+            images: (B, 3, 224, 224) — in EmoSet's ImageNet normalization; the
+                EmotionCLIP preprocessor must be applied upstream (via _EmoSetRaw).
+            labels: (B,) integer class indices.
+
+        Returns:
+            dict with keys: logits, preds, loss (if labels given).
+        """
+        device = self.text_tokens.device
+        images = images.to(device=device, dtype=self.model.dtype)
+
+        logits, _ = self.model(images, self.text_tokens)
+        logits = logits.float()  # upcast from fp16 for numerically stable CE loss
+
+        preds = logits.argmax(dim=-1)
+        output = {"logits": logits, "preds": preds}
+
+        if labels is not None:
+            output["loss"] = F.cross_entropy(logits, labels.to(device))
+
+        return output
+
 
 class TransformerWrapper(nn.Module):
     """Wrapper to make ModuleList of resblocks callable as a single transformer.
