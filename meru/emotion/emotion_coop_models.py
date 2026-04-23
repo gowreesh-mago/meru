@@ -26,6 +26,8 @@ coop_path = Path(__file__).parent.parent.parent / "CoOp"
 if str(coop_path) not in sys.path:
     sys.path.insert(0, str(coop_path))
 
+import clip as _clip  # noqa: E402  — OpenAI CLIP package (same one used by CoOp)
+
 from trainers.coop import PromptLearner
 from trainers.coop import TextEncoder as _CoOpTextEncoder  # noqa: E402
 
@@ -649,5 +651,99 @@ class MERUCoOpEmotion(nn.Module):
                     "entailment_loss": entailment_loss,
                 }
             )
+
+        return output
+
+
+# ---------------------------------------------------------------------------
+# OpenAI CLIP + CoOp (uses OpenAI's pretrained weights as backbone)
+# ---------------------------------------------------------------------------
+
+
+class CLIPCoOpOpenAI(nn.Module):
+    """
+    CoOp prompt-tuning on top of OpenAI's pretrained CLIP weights.
+
+    Loads OpenAI CLIP via ``clip.load(name)`` (auto-downloads to ~/.cache/clip)
+    and fine-tunes only the CoOp ``ctx`` parameters. Everything else is frozen.
+
+    Uses the *vanilla* CoOp ``PromptLearner`` and ``TextEncoder`` unchanged
+    (they are written for OpenAI CLIP's sequence-first transformer and apply
+    the correct NLD↔LND permutes — different from the MERU path in
+    ``CLIPCoOpEmotion``/``MERUCoOpEmotion`` which use batch_first).
+
+    The model is cast to fp32 after loading so that ``GradScaler.unscale_()``
+    can handle ctx gradients; AMP autocast still gives mixed precision
+    during the forward pass.
+    """
+
+    def __init__(
+        self,
+        emotion_names: list[str],
+        clip_model_name: str = "ViT-B/32",
+        n_ctx: int = 16,
+        ctx_init: str = "",
+        class_token_position: str = "end",
+        csc: bool = False,
+    ):
+        super().__init__()
+
+        clip_model, _ = _clip.load(clip_model_name, device="cpu")
+        clip_model = clip_model.float()
+
+        for param in clip_model.parameters():
+            param.requires_grad = False
+
+        cfg = SimpleNamespace(
+            TRAINER=SimpleNamespace(
+                COOP=SimpleNamespace(
+                    N_CTX=n_ctx,
+                    CSC=csc,
+                    CTX_INIT=ctx_init,
+                    CLASS_TOKEN_POSITION=class_token_position,
+                )
+            ),
+            INPUT=SimpleNamespace(
+                SIZE=[clip_model.visual.input_resolution] * 2,
+            ),
+        )
+
+        self.prompt_learner = PromptLearner(cfg, emotion_names, clip_model)
+        self.tokenized_prompts = self.prompt_learner.tokenized_prompts
+        self.text_encoder = _CoOpTextEncoder(clip_model)
+
+        self.image_encoder = clip_model.visual
+        self.logit_scale = clip_model.logit_scale
+        # Same frozen-param invariant as CLIPCoOpEmotion (see CLAUDE.md bug #2):
+        # logit_scale is not in the optimizer, so it must have requires_grad=False,
+        # otherwise clip_grad_norm_ mixes scaled/unscaled grads under AMP.
+        self.logit_scale.requires_grad = False
+
+        self.dtype = clip_model.dtype
+        # PromptLearner may override n_ctx when ctx_init is given; store the final value.
+        self.n_ctx = self.prompt_learner.n_ctx
+        self.emotion_names = emotion_names
+
+    def encode_image(self, images: torch.Tensor) -> torch.Tensor:
+        return self.image_encoder(images.type(self.dtype))
+
+    def forward(self, images: torch.Tensor, labels: torch.Tensor | None = None):
+        image_features = self.encode_image(images)
+
+        prompts = self.prompt_learner()
+        tokenized_prompts = self.tokenized_prompts.to(prompts.device)
+        text_features = self.text_encoder(prompts, tokenized_prompts)
+
+        image_features = F.normalize(image_features, dim=-1)
+        text_features = F.normalize(text_features, dim=-1)
+
+        logit_scale = self.logit_scale.exp()
+        logits = logit_scale * image_features @ text_features.t()
+
+        preds = logits.argmax(dim=-1)
+        output = {"logits": logits, "preds": preds}
+
+        if labels is not None:
+            output["loss"] = F.cross_entropy(logits, labels)
 
         return output

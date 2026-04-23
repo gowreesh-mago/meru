@@ -2,20 +2,19 @@
 # All rights reserved.
 
 """
-CLIP + CoOp for emotion classification on Emoset.
-Learns emotion-specific context prompts while freezing CLIP encoders.
+OpenAI CLIP + CoOp for emotion classification on EmoSet.
+
+Loads OpenAI's pretrained CLIP ViT-B/32 (via ``clip.load``) and learns only
+the CoOp soft-prompt ``ctx`` tokens. The backbone (visual + text transformer
++ logit_scale) is fully frozen.
 """
 
 from torch.optim import AdamW
 
 from meru.config import LazyCall as L
-from meru.emotion.emotion_coop_models import CLIPCoOpEmotion
-from meru.encoders.image_encoders import build_timm_vit
-from meru.encoders.text_encoders import TransformerTextEncoder
-from meru.models import CLIPBaseline
+from meru.emotion.emotion_coop_models import CLIPCoOpOpenAI
 from meru.optim import LinearWarmupCosineDecayLR
 
-# Emotion class names
 EMOTION_NAMES = [
     "amusement",
     "awe",
@@ -27,31 +26,16 @@ EMOTION_NAMES = [
     "sadness",
 ]
 
-# Model: CLIPBaseline + Learnable emotion prompts
-clip_base_model = L(CLIPBaseline)(
-    visual=L(build_timm_vit)(
-        arch="vit_base_patch16_224",
-        global_pool="token",
-        use_sincos2d_pos=True,
-    ),
-    textual=L(TransformerTextEncoder)(
-        arch="L12_W512",
-        vocab_size=49408,
-        context_length=77,
-    ),
-    embed_dim=512,
-)
-
-model = L(CLIPCoOpEmotion)(
-    clip_model="${..clip_base_model}",
+model = L(CLIPCoOpOpenAI)(
     emotion_names=EMOTION_NAMES,
-    n_ctx=16,  # Number of learnable context tokens
-    ctx_init="this picture conveys a sense of",  # Empty = random initialization
+    clip_model_name="ViT-B/32",
+    n_ctx=16,
+    ctx_init="this picture conveys a sense of",
     class_token_position="end",
-    csc=True,  # Class-specific context - each emotion gets its own learnable context
+    # Unified context — CSC overfits on 8-class EmoSet (see CoOp paper).
+    csc=False,
 )
 
-# Dataset: Emoset (registered via meru.emotion.dataset_integration)
 dataset = dict(
     name="emoset",
     data_root="datasets/emoset",
@@ -59,7 +43,6 @@ dataset = dict(
     batch_size=32,
 )
 
-# Optimizer: AdamW (matching CLIP baseline)
 optim = dict(
     optimizer=L(AdamW)(
         lr=0.002,
@@ -67,24 +50,21 @@ optim = dict(
         weight_decay=5e-4,
     ),
     lr_scheduler=L(LinearWarmupCosineDecayLR)(
-        # Note: total_steps and warmup_steps will be computed by training script
-        # as: total_steps = num_epochs * steps_per_epoch
-        #     warmup_steps = total_steps // 10  (10% warmup)
-        total_steps=0,  # Placeholder, computed at runtime
-        warmup_steps=0,  # Placeholder, computed at runtime
+        # total_steps / warmup_steps computed at runtime by train_emotion.py
+        total_steps=0,
+        warmup_steps=0,
     ),
 )
 
-# Training parameters
 train = dict(
     num_epochs=50,
     batch_size=32,
     num_workers=4,
-    amp=True,  # Automatic mixed precision
-    gradient_clip_max_norm=1.0,  # Prevent AMP overflow → optimizer skip-steps
+    amp=True,
+    gradient_clip_max_norm=1.0,
     seed=0,
-    checkpoint_period=5,  # Save checkpoint every 5 epochs
-    eval_period=1,  # Evaluate every epoch
+    checkpoint_period=5,
+    eval_period=1,
     early_stopping_patience=10,
-    pretrained_checkpoint="",  # Path to pretrained CLIPBaseline checkpoint
+    pretrained_checkpoint="",
 )

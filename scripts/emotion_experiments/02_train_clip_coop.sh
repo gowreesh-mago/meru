@@ -1,6 +1,7 @@
 #!/bin/bash
-# Train CLIP + CoOp for emotion classification
-# Learns emotion-specific context prompts while freezing CLIP encoders
+# Train OpenAI CLIP + CoOp for emotion classification.
+# Loads OpenAI's pretrained CLIP (auto-downloaded via clip.load) and learns
+# only the CoOp soft-prompt ctx tokens.
 
 set -e          # Exit on error
 set -o pipefail # Exit on error in any part of a pipeline
@@ -11,12 +12,11 @@ REPO_ROOT="$( cd "$SCRIPT_DIR/../.." && pwd )"
 export PYTHONPATH="$REPO_ROOT:${PYTHONPATH:-}"
 
 echo "=========================================="
-echo "Training CLIP + CoOp"
+echo "Training CLIP + CoOp (OpenAI weights)"
 echo "=========================================="
 
 # Configuration - read from environment or use defaults
 export EMOSET_ROOT="${EMOSET_ROOT:-datasets/emoset}"
-PRETRAINED="${PRETRAINED_CLIP:-checkpoints/clip_base.pth}"
 OUTPUT_DIR="${OUTPUT_DIR:-output/clip_coop}"
 LOG_DIR="${LOG_DIR:-$OUTPUT_DIR/logs}"
 
@@ -28,7 +28,7 @@ export NUM_CTX="${NUM_CTX:-16}"
 
 echo "Configuration:"
 echo "  Dataset: $EMOSET_ROOT"
-echo "  Pretrained: $PRETRAINED"
+echo "  Backbone: OpenAI CLIP ViT-B/32 (auto-downloaded by clip.load)"
 echo "  Output: $OUTPUT_DIR"
 echo "  Log directory: $LOG_DIR"
 echo "  Epochs: $NUM_EPOCHS"
@@ -40,25 +40,10 @@ if [ ! -z "$MAX_TRAIN_SAMPLES" ]; then
 fi
 echo ""
 
-# Check if pretrained checkpoint exists
-if [ ! -f "$PRETRAINED" ]; then
-    echo "ERROR: Pretrained checkpoint not found at $PRETRAINED"
-    echo "Please set PRETRAINED_CLIP environment variable"
-    echo ""
-    echo "Example:"
-    echo "  export PRETRAINED_CLIP=path/to/clip_checkpoint.pth"
-    echo "  bash scripts/emotion_experiments/02_train_clip_coop.sh"
-    exit 1
-fi
-
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
-# Create custom config if overrides are needed
 CONFIG_FILE="configs/emotion_clip_coop.py"
-if [ ! -z "$NUM_EPOCHS" ] || [ ! -z "$BATCH_SIZE" ] || [ ! -z "$LEARNING_RATE" ]; then
-    echo "Note: Using default config. To override parameters, modify configs/emotion_clip_coop.py"
-fi
 
 echo "Starting training..."
 echo "Press Ctrl+C to stop"
@@ -67,12 +52,11 @@ echo ""
 # Create log directory
 mkdir -p "$LOG_DIR"
 
-# Run training
+# Run training (no --pretrained: backbone weights come from clip.load)
 TRAIN_CMD="python \"$REPO_ROOT/scripts/train_emotion.py\" \
     --config \"$REPO_ROOT/$CONFIG_FILE\" \
     --output-dir \"$OUTPUT_DIR\" \
-    --log-dir \"$LOG_DIR\" \
-    --pretrained \"$PRETRAINED\""
+    --log-dir \"$LOG_DIR\""
 
 # Add --num-samples if MAX_TRAIN_SAMPLES is set
 if [ ! -z "$MAX_TRAIN_SAMPLES" ]; then

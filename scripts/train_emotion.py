@@ -32,7 +32,7 @@ import meru.emotion.dataset_integration  # noqa: F401
 from emoset.Emoset import EmoSet
 from meru.config import LazyConfig
 from meru.emotion.emotion_classes import EMOTION_CLASS_NAMES
-from meru.emotion.emotion_coop_models import CLIPCoOpEmotion, MERUCoOpEmotion
+from meru.emotion.emotion_coop_models import CLIPCoOpEmotion, CLIPCoOpOpenAI, MERUCoOpEmotion
 from meru.emotion.emotionclipv2_model import EmotionCLIPV2Emotion
 from meru.utils.checkpointing import CheckpointManager
 from meru.utils.wandb_logger import WandbLogger
@@ -380,7 +380,12 @@ def main(_A: argparse.Namespace):
 
     # Setup wandb (optional, controlled by environment variables)
     wandb_config = {
-        "model_type": "CLIP+CoOp" if isinstance(model, CLIPCoOpEmotion) else ("MERU+CoOp" if isinstance(model, MERUCoOpEmotion) else "EmotionCLIPV2+Prompt"),
+        "model_type": (
+            "CLIP+CoOp (OpenAI)" if isinstance(model, CLIPCoOpOpenAI)
+            else "CLIP+CoOp" if isinstance(model, CLIPCoOpEmotion)
+            else "MERU+CoOp" if isinstance(model, MERUCoOpEmotion)
+            else "EmotionCLIPV2+Prompt"
+        ),
         "num_epochs": _C.train["num_epochs"],
         "batch_size": _C.dataset["batch_size"],
         "learning_rate": _C.optim["optimizer"].lr,
